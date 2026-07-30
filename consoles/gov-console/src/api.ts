@@ -58,52 +58,45 @@ export async function login(role: Role, authorityId: string): Promise<Session> {
   return session
 }
 
-const GATEWAY = import.meta.env.VITE_GATEWAY_URL || 'http://localhost:8400'
-const ANALYTICS = import.meta.env.VITE_ANALYTICS_URL || 'http://localhost:8401'
-const JRB = import.meta.env.VITE_JRB_URL || 'http://localhost:8402'
-const OMBUD = import.meta.env.VITE_OMBUD_URL || 'http://localhost:8403'
+export type Service = 'analytics' | 'jrb' | 'ombud' | 'gateway'
 
-async function api<T>(base: string, path: string, s: Session, init?: RequestInit): Promise<T> {
+const BASE: Record<Service, string> = {
+  analytics: import.meta.env.VITE_ANALYTICS_URL || '/api/analytics',
+  jrb: import.meta.env.VITE_JRB_URL || '/api/jrb',
+  ombud: import.meta.env.VITE_OMBUD_URL || '/api/ombud',
+  gateway: import.meta.env.VITE_GATEWAY_URL || '/api/gateway',
+}
+
+export async function api<T = unknown>(
+  service: Service,
+  path: string,
+  opts: { method?: string; body?: unknown; session?: Session | null } = {},
+): Promise<T> {
   const headers: Record<string, string> = { 'Content-Type': 'application/json' }
-  if (s.token) headers['Authorization'] = `Bearer ${s.token}`
-  else headers['X-Dev-Role'] = s.role
-  if (base === JRB) headers['X-Authority-Id'] = s.authorityId
-  const res = await fetch(base + path, { ...init, headers: { ...headers, ...(init?.headers || {}) } })
+  const s = opts.session ?? loadSession()
+  if (s?.token) headers['Authorization'] = `Bearer ${s.token}`
+  else if (s?.role) headers['X-Dev-Role'] = s.role
+  if (s?.authorityId) headers['X-Authority-Id'] = s.authorityId
+  const res = await fetch(`${BASE[service]}${path}`, {
+    method: opts.method || 'GET',
+    headers,
+    body: opts.body !== undefined ? JSON.stringify(opts.body) : undefined,
+  })
+  const text = await res.text()
+  const data = text ? JSON.parse(text) : null
   if (!res.ok) {
-    const prob = await res.json().catch(() => ({}))
-    throw new Error(prob.detail || `${res.status} ${res.statusText}`)
+    const detail = data?.detail || data?.title || res.statusText
+    throw new Error(`${res.status}: ${detail}`)
   }
-  return res.json() as Promise<T>
+  return data as T
 }
 
-// ---- analytics (T4/T15) ----
-export interface ScoreRow {
-  pseudo_tin: string
-  score: number
-  band: string
-  explanation: { feature: string; contribution: number }[]
+export function fmtKobo(kobo: number | null | undefined): string {
+  if (kobo === null || kobo === undefined) return '—'
+  return '₦' + (kobo / 100).toLocaleString('en-NG', { minimumFractionDigits: 2 })
 }
-export const getScores = (s: Session) => api<{ scores: ScoreRow[] }>(ANALYTICS, '/v1/scores', s)
-export const getCases = (s: Session) => api<{ cases: unknown[] }>(ANALYTICS, '/v1/cases', s)
-export const getDeclarations = (s: Session) => api<{ declarations: unknown[] }>(ANALYTICS, '/v1/nsw/declarations', s)
 
-// ---- jrb (T11) ----
-export interface Authority {
-  id: string
-  kind: string
-  name: string
-  state_code?: string
-  status: string
-  cert_fingerprint?: string
+export function short(id: string | null | undefined, n = 12): string {
+  if (!id) return '—'
+  return id.length > n ? id.slice(0, n) + '…' : id
 }
-export const getAuthorities = (s: Session) => api<{ authorities: Authority[] }>(JRB, '/v1/authorities', s)
-export const getEOIs = (s: Session) => api<{ items: unknown[]; visibility_banner: string }>(JRB, '/v1/eoi', s)
-export const getAttribution = (s: Session) =>
-  api<Record<string, unknown>>(GATEWAY, '/flows/f7/attribution-feeds/NG-LA', s)
-
-// ---- ombud (T13i) ----
-export const getOmbudCases = (s: Session) => api<{ cases: unknown[] }>(OMBUD, '/v1/cases', s)
-
-// ---- gateway receipts ----
-export const getReceipts = (s: Session) =>
-  api<{ worm_mode: string; receipts: unknown[]; manifest: unknown[] }>(GATEWAY, '/v1/receipts', s)
