@@ -31,7 +31,7 @@ func devCertPEM(t *testing.T, cn string) string {
 }
 
 func TestAuthorityRegistrySeeded(t *testing.T) {
-	store, err := NewAuthorityStore(t.TempDir())
+	store, err := NewAuthorityStore(t.TempDir(), nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -46,7 +46,7 @@ func TestAuthorityRegistrySeeded(t *testing.T) {
 }
 
 func TestOnboardCertFingerprint(t *testing.T) {
-	store, _ := NewAuthorityStore(t.TempDir())
+	store, _ := NewAuthorityStore(t.TempDir(), nil)
 	pemStr := devCertPEM(t, "Kano State IRS Dev Cert")
 	a, err := store.Onboard("NG-KN", pemStr)
 	if err != nil {
@@ -67,7 +67,7 @@ func TestOnboardCertFingerprint(t *testing.T) {
 }
 
 func TestEOIFourPartyVisibility(t *testing.T) {
-	store, _ := NewEOIStore(t.TempDir())
+	store, _ := NewEOIStore(t.TempDir(), nil)
 	e, err := store.Create(&EOI{RequesterID: "NG-LA", ResponderID: "NG-KN",
 		SubjectPseudoTIN: "ptin_x", Purpose: "audit", Request: "provide filings"})
 	if err != nil {

@@ -1,6 +1,7 @@
-import { useState } from 'react'
+import { useEffect, useState } from 'react'
 import { Navigate, NavLink, Route, Routes, useNavigate } from 'react-router-dom'
 import { loadSession, login, saveSession, Session, Role } from './api'
+import { AUTH_MODE, beginOidcLogin, completeOidcLogin, oidcLogout, onOidcToken } from './oidc'
 import NrsDashboard from './pages/NrsDashboard'
 import CaseFeed from './pages/CaseFeed'
 import NswDeclarations from './pages/NswDeclarations'
@@ -26,6 +27,24 @@ const NAV = [
 ]
 
 function LoginPage({ onLogin }: { onLogin: (s: Session) => void }) {
+  if (AUTH_MODE === 'keycloak') {
+    return (
+      <div className="flex min-h-screen items-center justify-center bg-sand-100">
+        <div className="card w-full max-w-sm p-8">
+          <div className="mb-1 text-xs font-semibold uppercase tracking-widest text-clay-600">
+            Meridian · Sovereign Zone
+          </div>
+          <h1 className="mb-6 text-2xl font-bold text-sand-900">Gov Console</h1>
+          <button className="btn btn-primary w-full justify-center" onClick={() => void beginOidcLogin()}>
+            Sign in with Keycloak
+          </button>
+          <p className="mt-4 text-xs text-sand-500">
+            Production profile: Keycloak OIDC (authorization code + PKCE). Tokens in memory only.
+          </p>
+        </div>
+      </div>
+    )
+  }
   const [role, setRole] = useState<Role>('admin')
   const [authority, setAuthority] = useState('JRB-SEC')
   const [busy, setBusy] = useState(false)
@@ -78,6 +97,27 @@ function LoginPage({ onLogin }: { onLogin: (s: Session) => void }) {
 
 export default function App() {
   const [session, setSession] = useState<Session | null>(loadSession())
+  const [oidcBusy, setOidcBusy] = useState(AUTH_MODE === 'keycloak')
+
+  // Keycloak profile: finish the PKCE redirect / restore the in-memory user,
+  // and keep the session token fresh via silent renew.
+  useEffect(() => {
+    if (AUTH_MODE !== 'keycloak') return
+    let live = true
+    completeOidcLogin()
+      .then((s) => {
+        if (live && s) setSession(s)
+      })
+      .finally(() => live && setOidcBusy(false))
+    onOidcToken((s) => live && setSession(s))
+    return () => {
+      live = false
+    }
+  }, [])
+
+  if (AUTH_MODE === 'keycloak' && oidcBusy && !session) {
+    return <div className="flex min-h-screen items-center justify-center bg-sand-100 text-sand-500">Signing in…</div>
+  }
   if (!session) {
     return (
       <Routes>
@@ -119,6 +159,7 @@ export default function App() {
             <button
               className="btn"
               onClick={() => {
+                if (AUTH_MODE === 'keycloak') void oidcLogout()
                 saveSession(null)
                 setSession(null)
               }}

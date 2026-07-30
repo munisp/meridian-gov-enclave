@@ -20,3 +20,17 @@ Service base URLs can be overridden with `VITE_ANALYTICS_URL`, `VITE_JRB_URL`,
 `VITE_OMBUD_URL`, `VITE_GATEWAY_URL`.
 
 Design: low-saturation warm-neutral palette (sand/clay/moss), no gradients.
+
+## Prod profile (Keycloak OIDC, HARDENING H2)
+
+| Var | Purpose | Dev default |
+|---|---|---|
+| `VITE_AUTH_MODE` | `keycloak` enables OIDC login | `dev` (dev-token) |
+| `VITE_KEYCLOAK_ISSUER` | realm URL, e.g. `https://keycloak:8443/realms/meridian` | unset |
+| `VITE_KEYCLOAK_CLIENT_ID` | public client | `gov-console` |
+
+With `VITE_AUTH_MODE=keycloak` the console signs in via oidc-client-ts
+(authorization code + PKCE, `src/oidc.ts`). Access tokens live in memory only
+(never localStorage) and are renewed silently; realm roles map to the console
+roles (admin/operator/auditor). The dev-token login stays the default when the
+var is unset.

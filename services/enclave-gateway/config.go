@@ -22,6 +22,11 @@ type Config struct {
 	JRBURL            string // for F7 signed attribution feeds
 	WHTReconURL       string // for F8 WHT credit recon source
 	InternalFlowToken string // F6 enclave-internal shared token (dev)
+	// H1/H5 TLS & mTLS (prod profile):
+	TLSCertFile       string // TLS_CERT_FILE: server certificate (empty -> plain HTTP dev)
+	TLSKeyFile        string // TLS_KEY_FILE: server key
+	MTLSCAFile        string // GATEWAY_MTLS_CA_FILE: CA pool verifying client certs
+	RequireClientCert bool   // GATEWAY_REQUIRE_CLIENT_CERT=true -> require-and-verify
 }
 
 func getenv(k, def string) string {
@@ -49,5 +54,9 @@ func loadConfig() Config {
 		JRBURL:            os.Getenv("JRB_URL"),
 		WHTReconURL:       os.Getenv("WHT_RECON_URL"),
 		InternalFlowToken: getenv("INTERNAL_FLOW_TOKEN", "dev-internal-token"),
+		TLSCertFile:       os.Getenv("TLS_CERT_FILE"),
+		TLSKeyFile:        os.Getenv("TLS_KEY_FILE"),
+		MTLSCAFile:        os.Getenv("GATEWAY_MTLS_CA_FILE"),
+		RequireClientCert: os.Getenv("GATEWAY_REQUIRE_CLIENT_CERT") == "true",
 	}
 }

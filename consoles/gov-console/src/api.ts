@@ -10,8 +10,12 @@ export interface Session {
 }
 
 const KEY = 'gov-console-session'
+const AUTH_MODE = (import.meta.env.VITE_AUTH_MODE as string) || 'dev'
 
 export function loadSession(): Session | null {
+  // Prod (keycloak) profile: sessions live in memory only (HARDENING H2) —
+  // never restore from localStorage.
+  if (AUTH_MODE === 'keycloak') return null
   try {
     const raw = localStorage.getItem(KEY)
     return raw ? (JSON.parse(raw) as Session) : null
@@ -21,6 +25,7 @@ export function loadSession(): Session | null {
 }
 
 export function saveSession(s: Session | null) {
+  if (AUTH_MODE === 'keycloak') return // in-memory only in prod profile
   if (s) localStorage.setItem(KEY, JSON.stringify(s))
   else localStorage.removeItem(KEY)
 }
@@ -44,6 +49,8 @@ async function mintDevJwt(sub: string, roles: string[]): Promise<string> {
   return `${header}.${payload}.${b64(sig)}`
 }
 
+// login: dev profile mints a local HS256 dev JWT. When VITE_AUTH_MODE=keycloak
+// the PKCE redirect flow (oidc.ts) owns sign-in and this is not called.
 export async function login(role: Role, authorityId: string): Promise<Session> {
   const token = await mintDevJwt(`console-${role}`, [role])
   const session = { token, role, authorityId }

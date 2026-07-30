@@ -154,3 +154,50 @@ services + console build.
 | Reg-watch gate (ombud) | REAL interface; local gate file fallback (**simulated** reg-watch) |
 | mTLS | Documented prod profile; dev uses JWT + cert fingerprint onboarding |
 | Workflow runners | REAL in-proc runners (Temporal dev fallback per SPEC §1.1) |
+
+## Production hardening (HARDENING.md)
+
+Every real integration is env-selected; the dev fallback keeps working with
+zero config. Startup never fails because a prod var is missing; each selection
+logs `profile=dev|prod component=<name>`.
+
+### Environment variables (H1 contract)
+
+| Var | Services | Purpose | Dev default |
+|---|---|---|---|
+| `AUTH_MODE` | all | `dev` (HS256 + `X-Dev-Role`) or `keycloak` (RS256 JWKS) | dev |
+| `KEYCLOAK_ISSUER` | all | OIDC issuer, e.g. `https://keycloak:8443/realms/meridian` | unset |
+| `KEYCLOAK_AUDIENCE` | all | expected `aud`; enclave-gateway defaults to `meridian-services` (s2s client-credentials) | unset |
+| `KEYCLOAK_JWKS_URL` | all | JWKS endpoint; derived from issuer when unset | derived |
+| `MERIDIAN_DEV_JWT_SECRET` | all | dev-mode HMAC secret | `meridian-dev-secret` |
+| `DATABASE_URL` | jrb, ombud | `postgres://user:pass@host:5432/db` (pgx/v5, JSONB docs matching the JSON-file schemas, idempotent auto-migrate) | unset → JSON files |
+| `KAFKA_BROKERS` | jrb, ombud | comma list (Redpanda); franz-go producer/consumer (`packages/eventx`) | unset → embedded outbox bus |
+| `TLS_CERT_FILE` / `TLS_KEY_FILE` | enclave-gateway | server TLS | unset → plain HTTP |
+| `GATEWAY_MTLS_CA_FILE` | enclave-gateway | CA pool for client-cert verification | unset |
+| `GATEWAY_REQUIRE_CLIENT_CERT` | enclave-gateway | `true` → require-and-verify client certs (sovereign↔market mTLS) | false |
+| `VITE_AUTH_MODE` | gov-console | `keycloak` enables oidc-client-ts PKCE login | `dev` (dev-token) |
+| `VITE_KEYCLOAK_ISSUER` / `VITE_KEYCLOAK_CLIENT_ID` | gov-console | Keycloak realm URL / public client (`gov-console`) | unset / `gov-console` |
+
+### Prod profile
+
+- **Auth (H2)**: `packages/authx` — RS256 against Keycloak JWKS (5-min cache,
+  refresh on unknown kid), iss/exp/aud enforced, `realm_access.roles` → roles.
+  Python analytics mirrors it with PyJWT[crypto] + PyJWKClient. Dev mode is
+  unchanged (HS256 + `X-Dev-Role`).
+- **mTLS (H5)**: enclave-gateway with `TLS_CERT_FILE`/`TLS_KEY_FILE` +
+  `GATEWAY_REQUIRE_CLIENT_CERT=true` requires and verifies client certificates;
+  the verified cert CN (or JWT sub) is stamped as `X-Meridian-Caller` before
+  forwarding to enclave consumers. F9/F10 remain forbidden by construction
+  (middleware test proves no route matches).
+- **Storage (H3)**: `DATABASE_URL` switches jrb/ombud stores to Postgres
+  (`jrb_authorities`, `jrb_eoi`, `ombud_cases`; JSONB docs, auto-migrated).
+- **Bus (H3)**: `KAFKA_BROKERS` switches the emitter (`packages/eventx`) to
+  franz-go (SPEC 1.1 envelope, nrs.* topics); unset → `outbox.jsonl` embedded bus.
+- **Console**: `VITE_AUTH_MODE=keycloak` → authorization-code + PKCE login via
+  oidc-client-ts, tokens in memory only (never localStorage), silent renew.
+
+### CI
+
+`.github/workflows/ci.yml` (copy at `ci/workflows/ci.yml`, see `ci/README.md`):
+Go build/vet/`go test -race` per module, pytest for analytics, `npm ci` +
+`tsc` + build for gov-console.

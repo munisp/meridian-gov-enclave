@@ -18,7 +18,7 @@ func newTestServer(t *testing.T) (*Server, http.Handler) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	s := &Server{cfg: cfg, http: http.DefaultClient, worm: worm, localWorm: local}
+	s := &Server{cfg: cfg, authn: newAuthenticator(cfg), http: http.DefaultClient, worm: worm, localWorm: local}
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /healthz", s.healthz)
 	for id, f := range s.flows() {

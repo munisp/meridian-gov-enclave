@@ -1,134 +1,126 @@
 package main
 
 import (
+	"encoding/json"
 	"fmt"
 	"time"
 )
 
-// StateAdapter is the per-state IRS adapter framework. Real adapters integrate
-// with state IRS APIs; the reference adapters below are simulators behind the
-// same interface (honesty tag: SIMULATED).
+// StateAdapter is the per-state IRS integration framework (T11). Reference
+// adapters (lagos_lirs, fct_irs) are SIMULATED in dev; production adapters
+// implement the same interface against real state APIs.
 type StateAdapter interface {
 	StateCode() string
-	Name() string
-	// PullFilings returns filings-under-MoU available for JRB single-filing
-	// reconciliation for a period.
 	PullFilings(period string) ([]StateFiling, error)
-	// PushAssessment delivers a JRB assessment notice to the state IRS.
-	PushAssessment(notice AssessmentNotice) (string, error)
-	Health() string
+	PushAssessment(notice AssessmentNotice) (string, error) // returns ack id
 }
 
+// StateFiling is a filing row pulled from a state IRS system (pseudonymised).
 type StateFiling struct {
 	FilingID      string `json:"filing_id"`
 	PseudoTIN     string `json:"pseudo_tin"`
 	TaxType       string `json:"tax_type"`
 	Period        string `json:"period"`
 	AmountKobo    int64  `json:"amount_kobo"`
-	PlaceOfSupply string `json:"place_of_supply"` // LGA / market for consumption attribution
+	PlaceOfSupply string `json:"place_of_supply"`
 	FiledAt       string `json:"filed_at"`
 }
 
+// AssessmentNotice is pushed to a state IRS (wf-jrb-route).
 type AssessmentNotice struct {
-	NoticeID      string `json:"notice_id"`
-	PseudoTIN     string `json:"pseudo_tin"`
-	TaxType       string `json:"tax_type"`
-	AmountKobo    int64  `json:"amount_kobo"`
-	Basis         string `json:"basis"`
-	IssuedAt      string `json:"issued_at"`
+	NoticeID  string `json:"notice_id"`
+	PseudoTIN string `json:"pseudo_tin"`
+	TaxType   string `json:"tax_type"`
+	IssuedAt  string `json:"issued_at"`
 }
 
-// AdapterRegistry resolves state codes to adapters. Unregistered states fall
-// back to the generic adapter so all 36 states + FCT are reachable in dev.
+// --- reference adapter: lagos_lirs (SIMULATED dev data) ----------------------
+
+type lagosLIRSAdapter struct{}
+
+func (a lagosLIRSAdapter) StateCode() string { return "NG-LA" }
+
+func (a lagosLIRSAdapter) PullFilings(period string) ([]StateFiling, error) {
+	return []StateFiling{
+		{FilingID: "LIRS-2026-0001", PseudoTIN: "ptin_lag_demo1", TaxType: "PIT", Period: period,
+			AmountKobo: 2_500_000_00, PlaceOfSupply: "NG-LA", FiledAt: time.Now().UTC().Format(time.RFC3339)},
+		{FilingID: "LIRS-2026-0002", PseudoTIN: "ptin_lag_demo2", TaxType: "CIT", Period: period,
+			AmountKobo: 14_000_000_00, PlaceOfSupply: "NG-LA", FiledAt: time.Now().UTC().Format(time.RFC3339)},
+	}, nil
+}
+
+func (a lagosLIRSAdapter) PushAssessment(n AssessmentNotice) (string, error) {
+	ack, _ := json.Marshal(map[string]any{"adapter": "lagos_lirs", "notice_id": n.NoticeID,
+		"ack": "LIRS-ACK-" + n.NoticeID, "simulated": true})
+	return "LIRS-ACK-" + n.NoticeID + " (sha:" + shortHash(ack) + ")", nil
+}
+
+// --- reference adapter: fct_irs (SIMULATED dev data) -------------------------
+
+type fctIRSAdapter struct{}
+
+func (a fctIRSAdapter) StateCode() string { return "NG-FC" }
+
+func (a fctIRSAdapter) PullFilings(period string) ([]StateFiling, error) {
+	return []StateFiling{
+		{FilingID: "FCTIRS-2026-0001", PseudoTIN: "ptin_fct_demo1", TaxType: "PIT", Period: period,
+			AmountKobo: 1_100_000_00, PlaceOfSupply: "NG-FC", FiledAt: time.Now().UTC().Format(time.RFC3339)},
+	}, nil
+}
+
+func (a fctIRSAdapter) PushAssessment(n AssessmentNotice) (string, error) {
+	return "FCTIRS-ACK-" + n.NoticeID, nil
+}
+
+// --- generic fallback adapter (covers every state code) -----------------------
+
+type genericAdapter struct{ code string }
+
+func (a genericAdapter) StateCode() string { return a.code }
+
+func (a genericAdapter) PullFilings(period string) ([]StateFiling, error) {
+	return []StateFiling{
+		{FilingID: fmt.Sprintf("%s-GEN-%s-1", a.code, period), PseudoTIN: "ptin_" + a.code + "_demo",
+			TaxType: "PIT", Period: period, AmountKobo: 100_000_00,
+			PlaceOfSupply: a.code, FiledAt: time.Now().UTC().Format(time.RFC3339)},
+	}, nil
+}
+
+func (a genericAdapter) PushAssessment(n AssessmentNotice) (string, error) {
+	return a.code + "-ACK-" + n.NoticeID, nil
+}
+
+// AdapterRegistry resolves state codes to adapters.
 type AdapterRegistry struct {
-	adapters map[string]StateAdapter
+	reference map[string]StateAdapter
 }
 
 func NewAdapterRegistry() *AdapterRegistry {
-	r := &AdapterRegistry{adapters: map[string]StateAdapter{}}
-	r.Register(&LagosLIRSAdapter{})
-	r.Register(&FCTIRSAdapter{})
-	return r
+	return &AdapterRegistry{reference: map[string]StateAdapter{
+		"NG-LA": lagosLIRSAdapter{},
+		"NG-FC": fctIRSAdapter{},
+	}}
 }
 
-func (r *AdapterRegistry) Register(a StateAdapter) { r.adapters[a.StateCode()] = a }
-
 func (r *AdapterRegistry) For(stateCode string) StateAdapter {
-	if a, ok := r.adapters[stateCode]; ok {
+	if a, ok := r.reference[stateCode]; ok {
 		return a
 	}
-	return &GenericStateAdapter{code: stateCode}
+	return genericAdapter{code: stateCode}
 }
 
 func (r *AdapterRegistry) ReferenceAdapters() []string {
 	out := []string{}
-	for code := range r.adapters {
+	for code := range r.reference {
 		out = append(out, code)
 	}
 	return out
 }
 
-// --- reference adapter: Lagos LIRS (SIMULATED) -----------------------------
-
-type LagosLIRSAdapter struct{}
-
-func (a *LagosLIRSAdapter) StateCode() string { return "NG-LA" }
-func (a *LagosLIRSAdapter) Name() string      { return "Lagos Internal Revenue Service (LIRS)" }
-func (a *LagosLIRSAdapter) Health() string    { return "ok (simulated adapter)" }
-
-func (a *LagosLIRSAdapter) PullFilings(period string) ([]StateFiling, error) {
-	return []StateFiling{
-		{FilingID: "LA-" + period + "-001", PseudoTIN: "ptin_lagos_001", TaxType: "PAYE",
-			Period: period, AmountKobo: 18_500_000_00, PlaceOfSupply: "ikeja", FiledAt: time.Now().UTC().Format(time.RFC3339)},
-		{FilingID: "LA-" + period + "-002", PseudoTIN: "ptin_lagos_002", TaxType: "VAT",
-			Period: period, AmountKobo: 6_250_000_00, PlaceOfSupply: "lekki", FiledAt: time.Now().UTC().Format(time.RFC3339)},
-	}, nil
-}
-
-func (a *LagosLIRSAdapter) PushAssessment(n AssessmentNotice) (string, error) {
-	if n.PseudoTIN == "" {
-		return "", fmt.Errorf("pseudo_tin required")
+func shortHash(b []byte) string {
+	sum := [32]byte{}
+	for i, x := range b {
+		sum[i%32] ^= x
 	}
-	return fmt.Sprintf("LIRS-ACK-%s", n.NoticeID), nil
-}
-
-// --- reference adapter: FCT-IRS (SIMULATED) --------------------------------
-
-type FCTIRSAdapter struct{}
-
-func (a *FCTIRSAdapter) StateCode() string { return "NG-FC" }
-func (a *FCTIRSAdapter) Name() string      { return "FCT Internal Revenue Service" }
-func (a *FCTIRSAdapter) Health() string    { return "ok (simulated adapter)" }
-
-func (a *FCTIRSAdapter) PullFilings(period string) ([]StateFiling, error) {
-	return []StateFiling{
-		{FilingID: "FC-" + period + "-001", PseudoTIN: "ptin_fct_001", TaxType: "PAYE",
-			Period: period, AmountKobo: 9_750_000_00, PlaceOfSupply: "abuja-municipal", FiledAt: time.Now().UTC().Format(time.RFC3339)},
-	}, nil
-}
-
-func (a *FCTIRSAdapter) PushAssessment(n AssessmentNotice) (string, error) {
-	if n.PseudoTIN == "" {
-		return "", fmt.Errorf("pseudo_tin required")
-	}
-	return fmt.Sprintf("FCTIRS-ACK-%s", n.NoticeID), nil
-}
-
-// --- generic fallback adapter (SIMULATED) ----------------------------------
-
-type GenericStateAdapter struct{ code string }
-
-func (a *GenericStateAdapter) StateCode() string { return a.code }
-func (a *GenericStateAdapter) Name() string      { return "State IRS (generic simulated adapter)" }
-func (a *GenericStateAdapter) Health() string    { return "ok (generic simulated adapter)" }
-
-func (a *GenericStateAdapter) PullFilings(period string) ([]StateFiling, error) {
-	return []StateFiling{}, nil // no simulated filings for non-reference states
-}
-
-func (a *GenericStateAdapter) PushAssessment(n AssessmentNotice) (string, error) {
-	if n.PseudoTIN == "" {
-		return "", fmt.Errorf("pseudo_tin required")
-	}
-	return fmt.Sprintf("%s-ACK-%s", a.code, n.NoticeID), nil
+	return fmt.Sprintf("%x", sum[:4])
 }

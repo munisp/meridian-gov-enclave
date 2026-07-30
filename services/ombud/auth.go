@@ -1,96 +1,28 @@
 package main
 
 import (
-	"crypto/hmac"
-	"crypto/sha256"
-	"encoding/base64"
 	"encoding/json"
 	"net/http"
-	"strings"
-	"time"
+
+	"github.com/munisp/meridian-gov-enclave/packages/authx"
 )
 
-// Principal is the authenticated caller.
-type Principal struct {
-	Sub      string
-	Roles    []string
-	TenantID string
-}
+// Principal is the authenticated caller (shared authx implementation; H2:
+// AUTH_MODE=dev keeps HS256 + X-Dev-Role, AUTH_MODE=keycloak verifies RS256
+// against the Keycloak JWKS).
+type Principal = authx.Principal
 
-func (p Principal) HasRole(r string) bool {
-	for _, x := range p.Roles {
-		if x == r {
-			return true
-		}
+// newAuthenticator builds the env-selected authenticator for this service.
+func newAuthenticator(cfg Config) *authx.Authenticator {
+	ac := authx.ConfigFromEnv()
+	// Service-level env wins if set explicitly; otherwise shared contract.
+	if cfg.AuthMode != "" {
+		ac.Mode = cfg.AuthMode
 	}
-	return false
-}
-
-func b64urlDecode(s string) ([]byte, error) {
-	if m := len(s) % 4; m != 0 {
-		s += strings.Repeat("=", 4-m)
+	if cfg.JWTSecret != "" {
+		ac.DevSecret = cfg.JWTSecret
 	}
-	return base64.URLEncoding.DecodeString(s)
-}
-
-// decodeHS256 validates a HS256 JWT and returns its claims (SPEC 1.3).
-func decodeHS256(token, secret string) (map[string]any, bool) {
-	parts := strings.Split(token, ".")
-	if len(parts) != 3 {
-		return nil, false
-	}
-	mac := hmac.New(sha256.New, []byte(secret))
-	mac.Write([]byte(parts[0] + "." + parts[1]))
-	sig, err := b64urlDecode(parts[2])
-	if err != nil || !hmac.Equal(mac.Sum(nil), sig) {
-		return nil, false
-	}
-	payload, err := b64urlDecode(parts[1])
-	if err != nil {
-		return nil, false
-	}
-	var claims map[string]any
-	if err := json.Unmarshal(payload, &claims); err != nil {
-		return nil, false
-	}
-	if exp, ok := claims["exp"].(float64); ok && int64(exp) < time.Now().Unix() {
-		return nil, false
-	}
-	return claims, true
-}
-
-func principalFrom(r *http.Request, cfg Config) *Principal {
-	authz := r.Header.Get("Authorization")
-	if strings.HasPrefix(strings.ToLower(authz), "bearer ") {
-		if claims, ok := decodeHS256(strings.TrimSpace(authz[7:]), cfg.JWTSecret); ok {
-			p := &Principal{Sub: "unknown"}
-			if s, ok := claims["sub"].(string); ok {
-				p.Sub = s
-			}
-			if t, ok := claims["tenant_id"].(string); ok {
-				p.TenantID = t
-			}
-			switch roles := claims["roles"].(type) {
-			case string:
-				p.Roles = []string{roles}
-			case []any:
-				for _, x := range roles {
-					if s, ok := x.(string); ok {
-						p.Roles = append(p.Roles, s)
-					}
-				}
-			}
-			return p
-		}
-	}
-	if cfg.AuthMode == "dev" {
-		role := r.Header.Get("X-Dev-Role")
-		switch role {
-		case "admin", "operator", "auditor":
-			return &Principal{Sub: "dev-" + role, Roles: []string{role}, TenantID: "dev"}
-		}
-	}
-	return nil
+	return authx.New(ac, cfg.ServiceName)
 }
 
 // writeProblem emits RFC7807 problem+json (SPEC 1.3).

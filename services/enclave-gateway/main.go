@@ -18,14 +18,20 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/munisp/meridian-gov-enclave/packages/authx"
 )
 
 type ctxKey string
 
-const ctxPrincipal ctxKey = "principal"
+const (
+	ctxPrincipal ctxKey = "principal"
+	ctxCaller    ctxKey = "caller"
+)
 
 type Server struct {
 	cfg       Config
+	authn     *authx.Authenticator
 	http      *http.Client
 	worm      WORMStore
 	localWorm *LocalWORMStore
@@ -39,7 +45,8 @@ func main() {
 	if err != nil {
 		log.Fatalf("worm store: %v", err)
 	}
-	s := &Server{cfg: cfg, http: &http.Client{Timeout: 10 * time.Second}, worm: worm, localWorm: local}
+	s := &Server{cfg: cfg, authn: newAuthenticator(cfg),
+		http: &http.Client{Timeout: 10 * time.Second}, worm: worm, localWorm: local}
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /healthz", s.healthz)
@@ -63,9 +70,19 @@ func main() {
 	handler := s.denyForbiddenFlows(s.logRequests(mux))
 
 	addr := ":" + cfg.Port
+	tlsCfg, err := serverTLSConfig(cfg)
+	if err != nil {
+		log.Fatalf("tls: %v", err)
+	}
+	srv := &http.Server{Addr: addr, Handler: handler, TLSConfig: tlsCfg}
+	if tlsCfg != nil {
+		log.Printf("enclave-gateway %s listening on %s TLS (worm=%s auth=%s mtls=%v)",
+			cfg.Version, addr, worm.Mode(), cfg.AuthMode, cfg.RequireClientCert)
+		log.Fatal(srv.ListenAndServeTLS("", ""))
+	}
 	log.Printf("enclave-gateway %s listening on %s (worm=%s auth=%s)",
 		cfg.Version, addr, worm.Mode(), cfg.AuthMode)
-	log.Fatal(http.ListenAndServe(addr, handler))
+	log.Fatal(srv.ListenAndServe())
 }
 
 func (s *Server) healthz(w http.ResponseWriter, _ *http.Request) {
@@ -79,13 +96,18 @@ func (s *Server) readyz(w http.ResponseWriter, _ *http.Request) {
 
 func (s *Server) withAuth(next http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		p := principalFrom(r, s.cfg)
+		p := s.authn.PrincipalFrom(r)
 		if p == nil {
 			writeProblem(w, http.StatusUnauthorized, "Unauthorized",
 				"Bearer JWT or X-Dev-Role (dev) required")
 			return
 		}
-		next(w, r.WithContext(context.WithValue(r.Context(), ctxPrincipal, p)))
+		// Stamp the verified caller identity (mTLS cert CN or JWT sub) BEFORE
+		// anything is processed or forwarded (HARDENING H2/H5).
+		caller := stampCaller(r, p)
+		ctx := context.WithValue(r.Context(), ctxPrincipal, p)
+		ctx = context.WithValue(ctx, ctxCaller, caller)
+		next(w, r.WithContext(ctx))
 	}
 }
 
@@ -101,6 +123,19 @@ func (s *Server) denyForbiddenFlows(next http.Handler) http.Handler {
 		}
 		next.ServeHTTP(w, r)
 	})
+}
+
+// upstreamGet forwards a read to an enclave-internal source with the verified
+// caller identity stamped (X-Meridian-Caller).
+func (s *Server) upstreamGet(r *http.Request, url string) (*http.Response, error) {
+	req, err := http.NewRequestWithContext(r.Context(), http.MethodGet, url, nil)
+	if err != nil {
+		return nil, err
+	}
+	if caller, ok := r.Context().Value(ctxCaller).(string); ok && caller != "" {
+		req.Header.Set("X-Meridian-Caller", caller)
+	}
+	return s.http.Do(req)
 }
 
 func (s *Server) logRequests(next http.Handler) http.Handler {
@@ -151,7 +186,7 @@ func (s *Server) handleF7(w http.ResponseWriter, r *http.Request) {
 	state := r.PathValue("state")
 	var feed []byte
 	if s.cfg.JRBURL != "" {
-		resp, err := s.http.Get(s.cfg.JRBURL + "/v1/attribution/feeds/" + state + "/latest")
+		resp, err := s.upstreamGet(r, s.cfg.JRBURL+"/v1/attribution/feeds/"+state+"/latest")
 		if err != nil {
 			writeProblem(w, http.StatusBadGateway, "JRB unreachable", err.Error())
 			return
@@ -214,7 +249,7 @@ func (s *Server) handleF8(w http.ResponseWriter, r *http.Request) {
 
 	var entry map[string]any
 	if s.cfg.WHTReconURL != "" {
-		resp, err := s.http.Get(s.cfg.WHTReconURL + "/v1/wht/credits/" + pseudo)
+		resp, err := s.upstreamGet(r, s.cfg.WHTReconURL+"/v1/wht/credits/"+pseudo)
 		if err != nil {
 			writeProblem(w, http.StatusBadGateway, "WHT service unreachable", err.Error())
 			return

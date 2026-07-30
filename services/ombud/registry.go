@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -9,6 +10,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/munisp/meridian-gov-enclave/packages/storex"
 )
 
 // Lifecycle states from rp-procedure-ombud (ombud.lifecycle.states).
@@ -53,23 +56,42 @@ type HistoryEntry struct {
 	Detail string `json:"detail,omitempty"`
 }
 
+// CasesTable is the Postgres table (H3 DDL, idempotent auto-migrate).
+const CasesTable = "ombud_cases"
+
 type CaseStore struct {
 	mu   sync.Mutex
 	path string
 	byID map[string]*Case
 	seq  int
+	pg   *storex.DB // nil -> JSON-file dev fallback
 
 	ackDays    int // rp-procedure-ombud: ombud.deadline.acknowledge
 	decideDays int // rp-procedure-ombud: ombud.deadline.decide
 }
 
-func NewCaseStore(root string, ackDays, decideDays int) (*CaseStore, error) {
+// NewCaseStore opens the store. When pg is non-nil (DATABASE_URL set) case
+// rows persist in Postgres (ombud_cases, JSONB docs matching the JSON file
+// schema); otherwise the embedded JSON file is used.
+func NewCaseStore(root string, ackDays, decideDays int, pg *storex.DB) (*CaseStore, error) {
 	if err := os.MkdirAll(root, 0o755); err != nil {
 		return nil, err
 	}
 	s := &CaseStore{path: filepath.Join(root, "cases.json"), byID: map[string]*Case{},
-		ackDays: ackDays, decideDays: decideDays}
-	if data, err := os.ReadFile(s.path); err == nil {
+		ackDays: ackDays, decideDays: decideDays, pg: pg}
+	if pg != nil {
+		docs, err := pg.LoadDocs(context.Background(), CasesTable)
+		if err != nil {
+			return nil, fmt.Errorf("load cases from postgres: %w", err)
+		}
+		for id, doc := range docs {
+			var c Case
+			if json.Unmarshal(doc, &c) == nil {
+				s.byID[id] = &c
+			}
+		}
+		s.seq = len(s.byID)
+	} else if data, err := os.ReadFile(s.path); err == nil {
 		var rows []*Case
 		if json.Unmarshal(data, &rows) == nil {
 			for _, c := range rows {
@@ -87,6 +109,15 @@ func (s *CaseStore) saveLocked() {
 		rows = append(rows, c)
 	}
 	sort.Slice(rows, func(i, j int) bool { return rows[i].ID < rows[j].ID })
+	if s.pg != nil {
+		ctx := context.Background()
+		for _, c := range rows {
+			if doc, err := json.Marshal(c); err == nil {
+				_ = s.pg.UpsertDoc(ctx, CasesTable, c.ID, doc)
+			}
+		}
+		return
+	}
 	data, _ := json.MarshalIndent(rows, "", "  ")
 	_ = os.WriteFile(s.path, data, 0o644)
 }
@@ -124,7 +155,7 @@ func stateIndex(state string) int {
 	return -1
 }
 
-// Transition moves a case forward through the lifecycle (sequential, no skipping;
+// Transition moves a case forward through the lifecycle (no skipping backwards;
 // closing allowed from decided).
 func (s *CaseStore) Transition(actor, id, action, detail string) (*Case, error) {
 	s.mu.Lock()

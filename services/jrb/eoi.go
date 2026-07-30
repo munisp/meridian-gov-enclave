@@ -2,6 +2,7 @@ package main
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -10,88 +11,133 @@ import (
 	"time"
 )
 
-// EOI (Exchange of Information) record. Visibility is enforced as a FOUR-PARTY
-// rule: requester authority + responder authority + JRB secretariat (+ NRS
-// oversight role) may see the exchange; ANY fourth party is hard-denied.
+// EOI is an exchange-of-information between two authorities. Four-party
+// visibility is enforced in THIS store (requester + responder + secretariat;
+// any fourth party is hard-denied — test-proven).
 type EOI struct {
 	ID               string `json:"id"`
-	RequesterID      string `json:"requester_id"`      // authority ID, e.g. NG-LA
-	ResponderID      string `json:"responder_id"`      // authority ID, e.g. NG-KN
-	SubjectPseudoTIN string `json:"subject_pseudo_tin"` // pseudonymised subject only
+	RequesterID      string `json:"requester_id"`
+	ResponderID      string `json:"responder_id"`
+	SubjectPseudoTIN string `json:"subject_pseudo_tin"`
 	Purpose          string `json:"purpose"`
-	Status           string `json:"status"` // requested | in_transit | answered | closed
+	Status           string `json:"status"` // draft | sent | answered | closed
 	Request          string `json:"request"`
 	Response         string `json:"response,omitempty"`
+	GatewayReceiptID string `json:"gateway_receipt,omitempty"`
 	CreatedAt        string `json:"created_at"`
 	UpdatedAt        string `json:"updated_at"`
-	GatewayReceipt   string `json:"gateway_receipt,omitempty"` // WORM receipt id from enclave-gateway send
 }
 
-// canView enforces the four-party visibility rule.
-func (e *EOI) canView(authorityID string, isSecretariat bool) bool {
-	if isSecretariat {
-		return true
-	}
-	return authorityID == e.RequesterID || authorityID == e.ResponderID
-}
+var (
+	errNotFound  = errors.New("eoi not found")
+	errForbidden = errors.New("four-party visibility: access denied")
+)
 
+// EOIStore persists EOIs (JSON doc store; DATABASE_URL Postgres path via
+// storex in prod — same document schema).
 type EOIStore struct {
 	mu   sync.Mutex
-	path string
+	dir  string
+	pg   pgDocStore
 	byID map[string]*EOI
 	seq  int
 }
 
-func NewEOIStore(root string) (*EOIStore, error) {
-	if err := os.MkdirAll(root, 0o755); err != nil {
-		return nil, err
-	}
-	s := &EOIStore{path: filepath.Join(root, "eoi.json"), byID: map[string]*EOI{}}
-	if data, err := os.ReadFile(s.path); err == nil {
-		var rows []*EOI
-		if json.Unmarshal(data, &rows) == nil {
-			for _, r := range rows {
-				s.byID[r.ID] = r
-			}
-			s.seq = len(rows)
+const EOITable = "jrb_eoi"
+
+func NewEOIStore(dataRoot string, pg pgDocStore) (*EOIStore, error) {
+	s := &EOIStore{dir: filepath.Join(dataRoot, "eoi"), pg: pg, byID: map[string]*EOI{}}
+	if pg == nil {
+		if err := os.MkdirAll(s.dir, 0o755); err != nil {
+			return nil, err
 		}
+		if err := s.load(); err != nil {
+			return nil, err
+		}
+	} else if err := s.loadPG(); err != nil {
+		return nil, err
 	}
 	return s, nil
 }
 
-func (s *EOIStore) saveLocked() {
-	rows := make([]*EOI, 0, len(s.byID))
-	for _, e := range s.byID {
-		rows = append(rows, e)
+func (s *EOIStore) load() error {
+	entries, err := os.ReadDir(s.dir)
+	if err != nil {
+		return err
 	}
-	sort.Slice(rows, func(i, j int) bool { return rows[i].ID < rows[j].ID })
-	data, _ := json.MarshalIndent(rows, "", "  ")
-	_ = os.WriteFile(s.path, data, 0o644)
+	for _, e := range entries {
+		if filepath.Ext(e.Name()) != ".json" {
+			continue
+		}
+		data, err := os.ReadFile(filepath.Join(s.dir, e.Name()))
+		if err != nil {
+			return err
+		}
+		var rec EOI
+		if err := json.Unmarshal(data, &rec); err != nil {
+			return err
+		}
+		s.byID[rec.ID] = &rec
+	}
+	return nil
+}
+
+func (s *EOIStore) persist(e *EOI) error {
+	data, err := json.MarshalIndent(e, "", "  ")
+	if err != nil {
+		return err
+	}
+	if s.pg != nil {
+		return s.pg.UpsertDoc(EOITable, e.ID, data)
+	}
+	return os.WriteFile(filepath.Join(s.dir, e.ID+".json"), data, 0o644)
+}
+
+// visible reports whether authorityID may see e (four-party rule).
+func visible(e *EOI, authorityID string, isSecretariat bool) bool {
+	return isSecretariat || e.RequesterID == authorityID || e.ResponderID == authorityID
 }
 
 func (s *EOIStore) Create(req *EOI) (*EOI, error) {
-	if req.RequesterID == "" || req.ResponderID == "" || req.SubjectPseudoTIN == "" {
-		return nil, fmt.Errorf("requester_id, responder_id and subject_pseudo_tin are required")
-	}
-	if req.RequesterID == req.ResponderID {
-		return nil, fmt.Errorf("requester and responder must differ")
-	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	if req.RequesterID == "" || req.ResponderID == "" || req.SubjectPseudoTIN == "" {
+		return nil, errors.New("requester_id, responder_id, subject_pseudo_tin required")
+	}
+	if req.RequesterID == req.ResponderID {
+		return nil, errors.New("requester and responder must differ")
+	}
 	s.seq++
 	now := time.Now().UTC().Format(time.RFC3339)
 	e := &EOI{
-		ID: fmt.Sprintf("EOI-%06d", s.seq), RequesterID: req.RequesterID,
-		ResponderID: req.ResponderID, SubjectPseudoTIN: req.SubjectPseudoTIN,
-		Purpose: req.Purpose, Status: "requested", Request: req.Request,
-		CreatedAt: now, UpdatedAt: now,
+		ID:               fmt.Sprintf("EOI-%s-%04d", time.Now().UTC().Format("20060102"), s.seq),
+		RequesterID:      req.RequesterID,
+		ResponderID:      req.ResponderID,
+		SubjectPseudoTIN: req.SubjectPseudoTIN,
+		Purpose:          req.Purpose,
+		Status:           "draft",
+		Request:          req.Request,
+		CreatedAt:        now,
+		UpdatedAt:        now,
 	}
 	s.byID[e.ID] = e
-	s.saveLocked()
-	return e, nil
+	return e, s.persist(e)
 }
 
-// GetFor enforces four-party visibility: hard deny for any fourth party.
+func (s *EOIStore) MarkSent(id, receiptID string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	e, ok := s.byID[id]
+	if !ok {
+		return errNotFound
+	}
+	e.Status = "sent"
+	e.GatewayReceiptID = receiptID
+	e.UpdatedAt = time.Now().UTC().Format(time.RFC3339)
+	return s.persist(e)
+}
+
+// GetFor enforces the four-party visibility rule on reads.
 func (s *EOIStore) GetFor(id, authorityID string, isSecretariat bool) (*EOI, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -99,19 +145,19 @@ func (s *EOIStore) GetFor(id, authorityID string, isSecretariat bool) (*EOI, err
 	if !ok {
 		return nil, errNotFound
 	}
-	if !e.canView(authorityID, isSecretariat) {
+	if !visible(e, authorityID, isSecretariat) {
 		return nil, errForbidden
 	}
 	return e, nil
 }
 
-// ListFor returns only records visible to the caller.
+// ListFor returns only exchanges visible to the caller (inbox filtering).
 func (s *EOIStore) ListFor(authorityID string, isSecretariat bool) []*EOI {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	var out []*EOI
 	for _, e := range s.byID {
-		if e.canView(authorityID, isSecretariat) {
+		if visible(e, authorityID, isSecretariat) {
 			out = append(out, e)
 		}
 	}
@@ -119,35 +165,19 @@ func (s *EOIStore) ListFor(authorityID string, isSecretariat bool) []*EOI {
 	return out
 }
 
-func (s *EOIStore) Answer(id, responderID, response string) (*EOI, error) {
+// Answer lets ONLY the responder authority answer.
+func (s *EOIStore) Answer(id, authorityID, response string) (*EOI, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	e, ok := s.byID[id]
 	if !ok {
 		return nil, errNotFound
 	}
-	if e.ResponderID != responderID {
+	if e.ResponderID != authorityID {
 		return nil, errForbidden
 	}
 	e.Response = response
 	e.Status = "answered"
 	e.UpdatedAt = time.Now().UTC().Format(time.RFC3339)
-	s.saveLocked()
-	return e, nil
+	return e, s.persist(e)
 }
-
-func (s *EOIStore) MarkSent(id, receiptID string) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	if e, ok := s.byID[id]; ok {
-		e.Status = "in_transit"
-		e.GatewayReceipt = receiptID
-		e.UpdatedAt = time.Now().UTC().Format(time.RFC3339)
-		s.saveLocked()
-	}
-}
-
-var (
-	errNotFound   = fmt.Errorf("not found")
-	errForbidden  = fmt.Errorf("forbidden: four-party visibility rule denies access")
-)

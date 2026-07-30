@@ -131,8 +131,9 @@ func (s *Server) pipeline(w http.ResponseWriter, r *http.Request, f *Flow) {
 	}
 	s.logReceipt(receipt)
 
-	// Dispatch to enclave consumer.
-	dispatch, err := s.dispatch(f, raw)
+	// Dispatch to enclave consumer, forwarding the stamped caller identity.
+	caller, _ := r.Context().Value(ctxCaller).(string)
+	dispatch, err := s.dispatch(f, raw, caller)
 	if err != nil {
 		writeProblem(w, http.StatusBadGateway, "Consumer dispatch failed", err.Error())
 		return
@@ -143,9 +144,18 @@ func (s *Server) pipeline(w http.ResponseWriter, r *http.Request, f *Flow) {
 	})
 }
 
-func (s *Server) dispatch(f *Flow, raw []byte) (map[string]any, error) {
+func (s *Server) dispatch(f *Flow, raw []byte, caller string) (map[string]any, error) {
 	if f.ConsumerURL != "" {
-		resp, err := s.http.Post(f.ConsumerURL, "application/json", bytes.NewReader(raw))
+		req, err := http.NewRequest(http.MethodPost, f.ConsumerURL, bytes.NewReader(raw))
+		if err != nil {
+			return nil, err
+		}
+		req.Header.Set("Content-Type", "application/json")
+		if caller != "" {
+			// Verified caller identity (mTLS CN / JWT sub) stamped before forwarding.
+			req.Header.Set("X-Meridian-Caller", caller)
+		}
+		resp, err := s.http.Do(req)
 		if err != nil {
 			return nil, fmt.Errorf("consumer POST %s: %w", f.ConsumerURL, err)
 		}

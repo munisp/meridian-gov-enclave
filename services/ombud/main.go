@@ -13,6 +13,10 @@ import (
 	"log"
 	"net/http"
 	"time"
+
+	"github.com/munisp/meridian-gov-enclave/packages/authx"
+	"github.com/munisp/meridian-gov-enclave/packages/eventx"
+	"github.com/munisp/meridian-gov-enclave/packages/storex"
 )
 
 type ctxKey string
@@ -28,12 +32,14 @@ const (
 
 type Server struct {
 	cfg      Config
+	authn    *authx.Authenticator
 	cases    *CaseStore
 	ledger   LedgerClient
 	worm     WORMStore
 	gate     GateClient
 	localGate *LocalGateClient
 	depositBps int
+	emitter  eventx.Emitter
 }
 
 func main() {
@@ -43,7 +49,13 @@ func main() {
 	decideDays := 90
 	depositBps := packInt(cfg.PacksDir, "rp-deposit-20pct", "rate_bps", 2000)
 
-	cases, err := NewCaseStore(cfg.DataRoot, ackDays, decideDays)
+	pg, err := storex.Open(context.Background(), cfg.DatabaseURL, "ombud",
+		storex.DocTableDDL(CasesTable))
+	if err != nil {
+		log.Fatalf("store: %v", err)
+	}
+	defer pg.Close()
+	cases, err := NewCaseStore(cfg.DataRoot, ackDays, decideDays, pg)
 	if err != nil {
 		log.Fatal(err)
 	}
@@ -52,8 +64,10 @@ func main() {
 		log.Fatal(err)
 	}
 	gate, localGate := newGateClient(cfg)
-	s := &Server{cfg: cfg, cases: cases, ledger: newLedgerClient(cfg), worm: worm,
-		gate: gate, localGate: localGate, depositBps: depositBps}
+	emitter := eventx.New("ombud", cfg.DataRoot)
+	defer emitter.Close()
+	s := &Server{cfg: cfg, authn: newAuthenticator(cfg), cases: cases, ledger: newLedgerClient(cfg), worm: worm,
+		gate: gate, localGate: localGate, depositBps: depositBps, emitter: emitter}
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /healthz", s.healthz)
@@ -89,7 +103,7 @@ func (s *Server) readyz(w http.ResponseWriter, _ *http.Request) {
 
 func (s *Server) withAuth(next http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		p := principalFrom(r, s.cfg)
+		p := s.authn.PrincipalFrom(r)
 		if p == nil {
 			writeProblem(w, http.StatusUnauthorized, "Unauthorized", "Bearer JWT or X-Dev-Role (dev) required")
 			return
@@ -145,6 +159,13 @@ func (s *Server) intakeCase(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		writeProblem(w, http.StatusBadRequest, "Bad request", err.Error())
 		return
+	}
+	if s.emitter != nil {
+		_ = s.emitter.Emit(r.Context(), "nrs.dispute.ombud.v1", eventx.Envelope{
+			Type: "nrs.dispute.ombud.v1",
+			Data: map[string]any{"case_id": out.ID, "state": out.State,
+				"appellant_pseudo_tin": out.AppellantPseudoTIN, "tax_type": out.TaxType},
+		})
 	}
 	writeJSON(w, http.StatusCreated, out)
 }
