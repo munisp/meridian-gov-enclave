@@ -9,7 +9,7 @@ func newTestServer(t *testing.T) *Server {
 	t.Helper()
 	cfg := loadConfig()
 	cfg.DataRoot = t.TempDir()
-	cases, err := NewCaseStore(cfg.DataRoot, 7, 90)
+	cases, err := NewCaseStore(cfg.DataRoot, 7, 90, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
