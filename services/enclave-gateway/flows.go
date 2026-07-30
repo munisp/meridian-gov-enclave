@@ -29,100 +29,121 @@ type Flow struct {
 // gateway fetches the pinned pack from rp-registry; the fallback keeps dev standalone.
 func (s *Server) flows() map[string]*Flow {
 	return map[string]*Flow{
-		"F1": {ID: "F1", Name: "ubl-preclearance-invoices", Topic: "nrs.invoice.einvoice.v1",
+		"F1": {ID: "F1", Name: "ubl-preclearance-invoices", Topic: "nrs.mbs.preclearance.v1",
 			RequiredFields: []string{"invoice_id", "supplier_tin", "issue_date", "lines", "total_kobo"},
-			Scope:          "flow:f1:write", ConsumerURL: s.cfg.F1ConsumerURL},
-		"F2": {ID: "F2", Name: "cbcreports", Topic: "nrs.cbc.report.v1",
-			RequiredFields: []string{"report_id", "mpe_group", "jurisdictions", "period"},
-			Scope:          "flow:f2:write", ConsumerURL: s.cfg.F2ConsumerURL},
-		"F3": {ID: "F3", Name: "carf-exchanges", Topic: "nrs.carf.exchange.v1",
-			RequiredFields: []string{"exchange_id", "reporting_platform", "sellers", "period"},
-			Scope:          "flow:f3:write", ConsumerURL: s.cfg.F3ConsumerURL},
-		"F4": {ID: "F4", Name: "gir-filings", Topic: "nrs.gir.filing.v1",
-			RequiredFields: []string{"filing_id", "mpe_group", "top_up_tax", "jurisdictions"},
-			Scope:          "flow:f4:write", ConsumerURL: s.cfg.F4ConsumerURL},
-		"F5": {ID: "F5", Name: "mbs-remittance-declarations", Topic: "nrs.mbs.declaration.v1",
-			RequiredFields: []string{"declaration_id", "merchant_id", "period", "turnover_kobo"},
-			Scope:          "flow:f5:write", ConsumerURL: s.cfg.F5ConsumerURL},
-		"F6": {ID: "F6", Name: "eoi-requests", Topic: "nrs.jrb.eoi.v1",
+			Scope:          "flow:f1:send", ConsumerURL: s.cfg.F1ConsumerURL},
+		"F2": {ID: "F2", Name: "b2c-reports", Topic: "nrs.mbs.b2c.v1",
+			RequiredFields: []string{"report_id", "supplier_tin", "period", "total_sales_kobo", "total_vat_kobo"},
+			Scope:          "flow:f2:send", ConsumerURL: s.cfg.F2ConsumerURL},
+		"F3": {ID: "F3", Name: "carf-messages", Topic: "nrs.vasp.carf.v1",
+			RequiredFields: []string{"message_id", "reporting_vasp", "tax_year", "reportable_users"},
+			Scope:          "flow:f3:send", ConsumerURL: s.cfg.F3ConsumerURL},
+		"F4": {ID: "F4", Name: "etr-gir-filings", Topic: "nrs.globe.gir.v1",
+			RequiredFields: []string{"filing_id", "mne_group", "fiscal_year", "gir_document"},
+			Scope:          "flow:f4:send", ConsumerURL: s.cfg.F4ConsumerURL},
+		"F5": {ID: "F5", Name: "presumptive-remittances", Topic: "nrs.psm.remittance.v1",
+			RequiredFields: []string{"remittance_id", "operator_tin", "period", "amount_kobo", "certificate_serial"},
+			Scope:          "flow:f5:send", ConsumerURL: s.cfg.F5ConsumerURL},
+		"F6": {ID: "F6", Name: "eoi-exchange", Topic: "nrs.jrb.eoi.v1",
 			RequiredFields: []string{"eoi_id", "requester_state", "responder_state", "subject_pseudo_tin"},
 			Scope:          "flow:f6:internal", InternalOnly: true},
 	}
 }
 
-// scopeCheck is the dev Permify-style check: caller roles admin/operator carry
-// all flow scopes; auditor carries read scopes only. In production Permify
-// evaluates the same scope strings.
-func scopeCheck(p *Principal, scope string) bool {
-	if p.HasRole("admin") || p.HasRole("operator") {
-		return true
-	}
-	return strings.HasSuffix(scope, ":read")
+var devRoleScopes = map[string][]string{
+	"admin":    {"flow:f1:send", "flow:f2:send", "flow:f3:send", "flow:f4:send", "flow:f5:send", "flow:f7:read", "flow:f8:read", "receipts:read"},
+	"operator": {"flow:f1:send", "flow:f2:send", "flow:f3:send", "flow:f4:send", "flow:f5:send", "flow:f7:read", "flow:f8:read"},
+	"auditor":  {"flow:f7:read", "flow:f8:read", "receipts:read"},
 }
 
-// pipeline is the audited F1-F6 path: auth -> schema validate -> scope check
-// -> WORM receipt (BEFORE the consumer sees the message) -> dispatch.
+// scopeCheck is the Permify-style scope check (dev file-backed equivalent:
+// role -> scope map; production swaps in Permify via core permify-models).
+func scopeCheck(p *Principal, scope string) bool {
+	for _, r := range p.Roles {
+		for _, s := range devRoleScopes[r] {
+			if s == scope {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// validateSchema checks required fields and envelope sanity against the flow's
+// embedded schema (stand-in for rp-* JSON Schema validation).
+func validateSchema(f *Flow, payload map[string]any) []string {
+	var errs []string
+	for _, field := range f.RequiredFields {
+		v, ok := payload[field]
+		if !ok || v == nil || v == "" {
+			errs = append(errs, "missing required field: "+field)
+		}
+	}
+	return errs
+}
+
+// pipeline is THE audited path for accepted cross-zone messages:
+// schema validate -> scope check -> SYNCHRONOUS WORM evidence receipt (before
+// the enclave consumer sees anything) -> dispatch to enclave consumer.
 func (s *Server) pipeline(w http.ResponseWriter, r *http.Request, f *Flow) {
 	p := r.Context().Value(ctxPrincipal).(*Principal)
 
 	if f.InternalOnly {
-		// F6 is enclave-internal: shared token + never exposed cross-zone.
+		// F6 EOI: enclave-internal; never accepted from north-south callers.
+		// The shared internal token IS the authorisation (mTLS in prod profile);
+		// north-south scope checks do not apply.
 		if r.Header.Get("X-Internal-Flow-Token") != s.cfg.InternalFlowToken {
 			writeProblem(w, http.StatusForbidden, "Forbidden",
-				"F6 is enclave-internal: X-Internal-Flow-Token required")
+				"F6 (EOI exchange) is enclave-internal and not a north-south flow")
 			return
 		}
 	} else if !scopeCheck(p, f.Scope) {
-		writeProblem(w, http.StatusForbidden, "Forbidden", "scope "+f.Scope+" required")
+		writeProblem(w, http.StatusForbidden, "Forbidden",
+			"principal lacks required scope "+f.Scope)
 		return
 	}
-
-	raw, err := io.ReadAll(io.LimitReader(r.Body, 4<<20))
-	if err != nil || len(raw) == 0 {
-		writeProblem(w, http.StatusBadRequest, "Bad request", "empty body")
-		return
-	}
-	var msg map[string]any
-	if err := json.Unmarshal(raw, &msg); err != nil {
-		writeProblem(w, http.StatusBadRequest, "Bad request", "invalid JSON: "+err.Error())
-		return
-	}
-	// Schema validation against the embedded rp-* required-field subset.
-	var missing []string
-	for _, rf := range f.RequiredFields {
-		if _, ok := msg[rf]; !ok {
-			missing = append(missing, rf)
-		}
-	}
-	if len(missing) > 0 {
-		writeProblem(w, http.StatusUnprocessableEntity, "Schema validation failed",
-			"missing required fields (rp-* embedded schema): "+strings.Join(missing, ", "))
-		return
-	}
-
-	// WORM evidence receipt BEFORE dispatch — if WORM fails, nothing proceeds.
-	rc, err := s.worm.Store(f.ID, f.Topic, raw)
+	raw, err := io.ReadAll(io.LimitReader(r.Body, 8<<20))
 	if err != nil {
-		writeProblem(w, http.StatusBadGateway, "WORM store failed", err.Error())
+		writeProblem(w, http.StatusBadRequest, "Bad request", "unreadable body")
 		return
 	}
-	s.logReceipt(rc)
+	var payload map[string]any
+	if err := json.Unmarshal(raw, &payload); err != nil {
+		writeProblem(w, http.StatusBadRequest, "Bad request", "body must be a JSON object")
+		return
+	}
+	if verrs := validateSchema(f, payload); len(verrs) > 0 {
+		writeProblem(w, http.StatusUnprocessableEntity, "Schema validation failed",
+			strings.Join(verrs, "; ")+" (schema: embedded dev subset of rp-*)")
+		return
+	}
+	msgID, _ := payload[f.RequiredFields[0]].(string)
+	if msgID == "" {
+		msgID = fmt.Sprintf("msg-%d", time.Now().UnixNano())
+	}
+
+	// Synchronous WORM evidence receipt BEFORE dispatch.
+	receipt, err := s.worm.Store(f.ID, msgID, raw)
+	if err != nil {
+		writeProblem(w, http.StatusBadGateway, "Evidence store unavailable",
+			"message NOT dispatched: "+err.Error())
+		return
+	}
+	s.logReceipt(receipt)
 
 	// Dispatch to enclave consumer, forwarding the stamped caller identity.
 	caller, _ := r.Context().Value(ctxCaller).(string)
 	dispatch, err := s.dispatch(f, raw, caller)
 	if err != nil {
-		writeProblem(w, http.StatusBadGateway, "Dispatch failed", err.Error())
+		writeProblem(w, http.StatusBadGateway, "Consumer dispatch failed", err.Error())
 		return
 	}
-
 	writeJSON(w, http.StatusAccepted, map[string]any{
-		"flow": f.ID, "topic": f.Topic, "receipt": rc, "dispatch": dispatch,
+		"flow": f.ID, "message_id": msgID, "accepted": true,
+		"evidence_receipt": receipt, "dispatch": dispatch,
 	})
 }
 
-// dispatch forwards to the enclave consumer API, or to the local spool when no
-// consumer is wired (dev fallback).
 func (s *Server) dispatch(f *Flow, raw []byte, caller string) (map[string]any, error) {
 	if f.ConsumerURL != "" {
 		req, err := http.NewRequest(http.MethodPost, f.ConsumerURL, bytes.NewReader(raw))
@@ -136,22 +157,23 @@ func (s *Server) dispatch(f *Flow, raw []byte, caller string) (map[string]any, e
 		}
 		resp, err := s.http.Do(req)
 		if err != nil {
-			return nil, fmt.Errorf("consumer %s: %w", f.ConsumerURL, err)
+			return nil, fmt.Errorf("consumer POST %s: %w", f.ConsumerURL, err)
 		}
 		defer resp.Body.Close()
 		if resp.StatusCode >= 300 {
-			return nil, fmt.Errorf("consumer %s: %s", f.ConsumerURL, resp.Status)
+			b, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
+			return nil, fmt.Errorf("consumer returned %d: %s", resp.StatusCode, string(b))
 		}
-		return map[string]any{"mode": "consumer-api", "status": resp.Status}, nil
+		return map[string]any{"mode": "consumer-api", "url": f.ConsumerURL, "status": resp.StatusCode}, nil
 	}
-	// Local spool: durable handoff to the enclave consumer.
-	dir := filepath.Join(s.cfg.DataRoot, "spool", f.ID)
+	// Local dev fallback: durable spool inside the enclave data root.
+	dir := filepath.Join(s.cfg.DataRoot, "dispatched", strings.ToLower(f.ID))
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		return nil, err
 	}
-	name := fmt.Sprintf("%d.json", time.Now().UnixNano())
+	name := fmt.Sprintf("%s-%d.json", strings.ToLower(f.ID), time.Now().UnixNano())
 	if err := os.WriteFile(filepath.Join(dir, name), raw, 0o644); err != nil {
 		return nil, err
 	}
-	return map[string]any{"mode": "local-spool", "spool": filepath.Join("spool", f.ID, name)}, nil
+	return map[string]any{"mode": "local-spool", "path": filepath.Join(dir, name)}, nil
 }
