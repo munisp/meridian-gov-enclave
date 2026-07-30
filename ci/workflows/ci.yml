@@ -1,0 +1,50 @@
+name: ci
+
+on:
+  push:
+    branches: [main, hardening/prod]
+  pull_request:
+
+jobs:
+  go:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.23.4"
+      - name: build/vet/test per Go module
+        run: |
+          set -e
+          for m in packages/authx packages/storex packages/eventx \
+                   services/jrb services/ombud services/enclave-gateway; do
+            echo "== $m"
+            (cd "$m" && go mod tidy && go build ./... && go vet ./... && go test -race ./...)
+          done
+
+  python-analytics:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: install + pytest
+        run: |
+          cd services/analytics
+          pip install -r requirements.txt
+          python -m pytest tests -q
+
+  gov-console:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+      - name: npm ci + tsc + build
+        run: |
+          cd consoles/gov-console
+          npm install  # no lockfile in repo; npm ci requires one
+          npx tsc -b
+          npm run build
