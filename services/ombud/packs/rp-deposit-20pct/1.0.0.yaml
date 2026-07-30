@@ -1,0 +1,24 @@
+id: rp-deposit-20pct
+version: 1.0.0
+effective_from: 2026-01-01
+effective_to: null
+status: published
+subject_to_regazette: true
+provenance:
+  as_passed: "NTAA 2025 — security deposit for appeals: 20% of disputed amount"
+  as_gazetted: null
+  source_citation: "NTAA 2025 appeal deposit provision"
+rules:
+  - id: deposit.appeal.rate
+    when: { entity: appeal, stage: admission }
+    then:
+      rate_bps: 2000
+      base: disputed_amount_kobo
+      ledger: 500
+      narrate: "Appellant deposits 20% of the disputed tax into dispute_deposits (ledger 500) as a hold before admission"
+  - id: deposit.release.outcome
+    when: { entity: appeal, event: decided }
+    then:
+      on_appellant_win: release_to_appellant
+      on_revenue_win: settle_to_revenue
+      narrate: "Hold released or settled on decision (codes 6 hold / 7 release / 5 settle)"

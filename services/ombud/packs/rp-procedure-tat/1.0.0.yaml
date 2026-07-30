@@ -1,0 +1,20 @@
+id: rp-procedure-tat
+version: 1.0.0
+effective_from: 2026-01-01
+effective_to: null
+status: published
+subject_to_regazette: true
+provenance:
+  as_passed: "FIRS (Establishment) Act / NTAA — Tax Appeal Tribunal procedure"
+  as_gazetted: null
+  source_citation: "TAT procedural rules"
+rules:
+  - id: tat.appeal.window
+    when: { entity: assessment, event: service }
+    then: { days: 30, narrate: "Appeals must be lodged within 30 days of service of assessment" }
+  - id: tat.hearing.representation
+    when: { entity: appeal }
+    then: { representation: [self, counsel, tax_practitioner], narrate: "Appellant representation modes" }
+  - id: tat.record.tat
+    when: { output: technical_audit_trail }
+    then: { required: true, narrate: "Technical audit trail: who saw what when under which rule_pack_version" }

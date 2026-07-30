@@ -1,0 +1,25 @@
+id: rp-procedure-ombud
+version: 1.0.0
+effective_from: 2026-01-01
+effective_to: null
+status: published
+subject_to_regazette: true
+provenance:
+  as_passed: "Nigeria Tax Administration Act 2025 — Tax Appeal Tribunal / Ombud procedure"
+  as_gazetted: null
+  source_citation: "NTAA 2025 ombud procedure provisions"
+rules:
+  - id: ombud.lifecycle.states
+    when: { entity: case }
+    then:
+      states: [received, acknowledged, under_review, hearing, decided, closed]
+      narrate: "Canonical lifecycle for ombud cases"
+  - id: ombud.deadline.acknowledge
+    when: { entity: case, event: intake }
+    then: { days: 7, narrate: "Acknowledge receipt within 7 days" }
+  - id: ombud.deadline.decide
+    when: { entity: case, event: intake }
+    then: { days: 90, narrate: "Decision target within 90 days of intake" }
+  - id: ombud.deadline.hearing_notice
+    when: { entity: case, event: hearing_scheduled }
+    then: { days: 14, narrate: "At least 14 days notice before hearing" }

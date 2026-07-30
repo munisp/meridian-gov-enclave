@@ -1,0 +1,20 @@
+id: rp-ntaa-penalties
+version: 1.0.0
+effective_from: 2026-01-01
+effective_to: null
+status: published
+subject_to_regazette: true
+provenance:
+  as_passed: "Nigeria Tax Administration Act 2025 — penalty provisions"
+  as_gazetted: null
+  source_citation: "NTAA 2025 penalties"
+rules:
+  - id: pen.late_filing.companies
+    when: { offence: late_filing, taxpayer: company }
+    then: { first_month_kobo: 50000000, subsequent_months_kobo: 2500000, narrate: "Late filing: N50,000 first month? corrected per NTAA: see gazette watch (subject_to_regazette)" }
+  - id: pen.late_payment.interest
+    when: { offence: late_payment }
+    then: { interest: "CBN MPR + spread per NTAA", narrate: "Interest on late payment at prescribed rate" }
+  - id: pen.evasion
+    when: { offence: evasion }
+    then: { penalty_bps_of_tax: 10000, narrate: "Evasion penalty up to 100% of tax due plus prosecution" }
