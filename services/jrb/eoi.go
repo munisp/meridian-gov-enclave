@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -8,6 +9,8 @@ import (
 	"sort"
 	"sync"
 	"time"
+
+	"github.com/munisp/meridian-gov-enclave/packages/storex"
 )
 
 // EOI (Exchange of Information) record. Visibility is enforced as a FOUR-PARTY
@@ -35,25 +38,45 @@ func (e *EOI) canView(authorityID string, isSecretariat bool) bool {
 	return authorityID == e.RequesterID || authorityID == e.ResponderID
 }
 
+// EOITable is the Postgres table (H3 DDL, idempotent auto-migrate).
+const EOITable = "jrb_eoi"
+
 type EOIStore struct {
 	mu   sync.Mutex
 	path string
 	byID map[string]*EOI
 	seq  int
+	pg   *storex.DB // nil -> JSON-file dev fallback
 }
 
-func NewEOIStore(root string) (*EOIStore, error) {
+func NewEOIStore(root string, pg *storex.DB) (*EOIStore, error) {
 	if err := os.MkdirAll(root, 0o755); err != nil {
 		return nil, err
 	}
-	s := &EOIStore{path: filepath.Join(root, "eoi.json"), byID: map[string]*EOI{}}
-	if data, err := os.ReadFile(s.path); err == nil {
+	s := &EOIStore{path: filepath.Join(root, "eoi.json"), byID: map[string]*EOI{}, pg: pg}
+	load := func(rows []*EOI) {
+		for _, r := range rows {
+			s.byID[r.ID] = r
+		}
+		s.seq = len(s.byID)
+	}
+	if pg != nil {
+		docs, err := pg.LoadDocs(context.Background(), EOITable)
+		if err != nil {
+			return nil, fmt.Errorf("load eoi from postgres: %w", err)
+		}
+		var rows []*EOI
+		for _, doc := range docs {
+			var e EOI
+			if json.Unmarshal(doc, &e) == nil {
+				rows = append(rows, &e)
+			}
+		}
+		load(rows)
+	} else if data, err := os.ReadFile(s.path); err == nil {
 		var rows []*EOI
 		if json.Unmarshal(data, &rows) == nil {
-			for _, r := range rows {
-				s.byID[r.ID] = r
-			}
-			s.seq = len(rows)
+			load(rows)
 		}
 	}
 	return s, nil
@@ -65,6 +88,15 @@ func (s *EOIStore) saveLocked() {
 		rows = append(rows, e)
 	}
 	sort.Slice(rows, func(i, j int) bool { return rows[i].ID < rows[j].ID })
+	if s.pg != nil {
+		ctx := context.Background()
+		for _, e := range rows {
+			if doc, err := json.Marshal(e); err == nil {
+				_ = s.pg.UpsertDoc(ctx, EOITable, e.ID, doc)
+			}
+		}
+		return
+	}
 	data, _ := json.MarshalIndent(rows, "", "  ")
 	_ = os.WriteFile(s.path, data, 0o644)
 }
@@ -148,6 +180,6 @@ func (s *EOIStore) MarkSent(id, receiptID string) {
 }
 
 var (
-	errNotFound   = fmt.Errorf("not found")
-	errForbidden  = fmt.Errorf("forbidden: four-party visibility rule denies access")
+	errNotFound  = fmt.Errorf("not found")
+	errForbidden = fmt.Errorf("forbidden: four-party visibility rule denies access")
 )
