@@ -3,10 +3,9 @@ package main
 import (
 	"context"
 	"crypto/sha256"
-	"crypto/x509"
 	"encoding/hex"
 	"encoding/json"
-	"encoding/pem"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -17,114 +16,134 @@ import (
 	"github.com/munisp/meridian-gov-enclave/packages/storex"
 )
 
-// Authority is a member of the Joint Revenue Board registry: NRS, the JRB
-// secretariat itself, or a state IRS / FCT-IRS.
+// Authority is one row of the JRB authority registry (NRS, secretariat,
+// 36 states + FCT, plus onboarded bodies).
 type Authority struct {
-	ID             string `json:"id"` // e.g. "NG-LA", "NRS", "JRB-SEC"
-	Kind           string `json:"kind"` // nrs | secretariat | state_irs
-	Name           string `json:"name"`
-	StateCode      string `json:"state_code,omitempty"`
-	Status         string `json:"status"` // seeded | onboarding | active | suspended
-	CertFingerprint string `json:"cert_fingerprint,omitempty"`
-	OnboardedAt    string `json:"onboarded_at,omitempty"`
-	MTLSNotes      string `json:"mtls_notes,omitempty"`
+	ID              string    `json:"id"`
+	Kind            string    `json:"kind"` // nrs | jrb_secretariat | state_irs | other
+	Name            string    `json:"name"`
+	Status          string    `json:"status"` // seeded | active | suspended
+	CertFingerprint string    `json:"cert_fingerprint,omitempty"`
+	OnboardedAt     string    `json:"onboarded_at,omitempty"`
+	OnboardingNotes string    `json:"onboarding_notes,omitempty"`
+	CreatedAt       time.Time `json:"created_at"`
+	UpdatedAt       time.Time `json:"updated_at"`
 }
 
-const prodMTLSNotes = "PROD: authority presents an X.509 client certificate issued by the " +
-	"JRB PKI; mTLS both directions plus OIDC client-credentials. Dev profile accepts a PEM " +
-	"cert upload and records its SHA-256 fingerprint instead."
+// pgDocStore is the storex-backed Postgres document path (H3); nil in dev.
+type pgDocStore interface {
+	UpsertDoc(ctx context.Context, table, id string, doc []byte) error
+	DeleteDoc(ctx context.Context, table, id string) error
+	LoadDocs(ctx context.Context, table string) (map[string][]byte, error)
+}
 
-// AuthoritiesTable is the Postgres table (H3 DDL, idempotent auto-migrate).
-const AuthoritiesTable = "jrb_authorities"
-
+// AuthorityStore persists the registry. Dev: JSON files (zero config).
+// Prod: DATABASE_URL Postgres via storex (jrb_authorities, JSONB docs).
 type AuthorityStore struct {
 	mu   sync.Mutex
-	path string
+	dir  string
+	pg   pgDocStore
 	byID map[string]*Authority
-	pg   *storex.DB // nil -> JSON-file dev fallback
 }
 
-// NewAuthorityStore opens the store. When pg is non-nil (DATABASE_URL set) the
-// canonical rows live in Postgres (jrb_authorities, JSONB docs matching the
-// JSON file schema); otherwise the embedded JSON file is used.
-func NewAuthorityStore(root string, pg *storex.DB) (*AuthorityStore, error) {
-	if err := os.MkdirAll(root, 0o755); err != nil {
+const AuthoritiesTable = "jrb_authorities"
+
+func NewAuthorityStore(dataRoot string, pg pgDocStore) (*AuthorityStore, error) {
+	s := &AuthorityStore{dir: filepath.Join(dataRoot, "authorities"), pg: pg,
+		byID: map[string]*Authority{}}
+	if pg == nil {
+		if err := os.MkdirAll(s.dir, 0o755); err != nil {
+			return nil, err
+		}
+		if err := s.load(); err != nil {
+			return nil, err
+		}
+	} else if err := s.loadPG(); err != nil {
 		return nil, err
 	}
-	s := &AuthorityStore{path: filepath.Join(root, "authorities.json"), byID: map[string]*Authority{}, pg: pg}
-	if pg != nil {
-		docs, err := pg.LoadDocs(context.Background(), AuthoritiesTable)
-		if err != nil {
-			return nil, fmt.Errorf("load authorities from postgres: %w", err)
-		}
-		for id, doc := range docs {
-			var a Authority
-			if json.Unmarshal(doc, &a) == nil {
-				s.byID[id] = &a
-			}
-		}
-	} else if data, err := os.ReadFile(s.path); err == nil {
-		var rows []*Authority
-		if json.Unmarshal(data, &rows) == nil {
-			for _, r := range rows {
-				s.byID[r.ID] = r
-			}
-		}
-	}
 	s.seed()
-	return s, s.saveLocked()
+	return s, nil
 }
 
+func (s *AuthorityStore) load() error {
+	entries, err := os.ReadDir(s.dir)
+	if err != nil {
+		return err
+	}
+	for _, e := range entries {
+		if filepath.Ext(e.Name()) != ".json" {
+			continue
+		}
+		data, err := os.ReadFile(filepath.Join(s.dir, e.Name()))
+		if err != nil {
+			return err
+		}
+		var a Authority
+		if err := json.Unmarshal(data, &a); err != nil {
+			return err
+		}
+		s.byID[a.ID] = &a
+	}
+	return nil
+}
+
+func (s *AuthorityStore) loadPG() error {
+	docs, err := s.pg.LoadDocs(context.Background(), AuthoritiesTable)
+	if err != nil {
+		return err
+	}
+	for id, raw := range docs {
+		var a Authority
+		if err := json.Unmarshal(raw, &a); err != nil {
+			return fmt.Errorf("decode authority %s: %w", id, err)
+		}
+		s.byID[id] = &a
+	}
+	return nil
+}
+
+// seed inserts NRS, the secretariat, and all 36 states + FCT when missing.
 func (s *AuthorityStore) seed() {
-	if s.byID["NRS"] == nil {
-		s.byID["NRS"] = &Authority{ID: "NRS", Kind: "nrs", Name: "Nigeria Revenue Service",
-			Status: "active", OnboardedAt: time.Now().UTC().Format(time.RFC3339)}
-	}
-	if s.byID["JRB-SEC"] == nil {
-		s.byID["JRB-SEC"] = &Authority{ID: "JRB-SEC", Kind: "secretariat",
-			Name: "Joint Revenue Board Secretariat", Status: "active",
-			OnboardedAt: time.Now().UTC().Format(time.RFC3339)}
-	}
-	for _, st := range nigerianStates {
-		if s.byID[st.Code] == nil {
-			s.byID[st.Code] = &Authority{ID: st.Code, Kind: "state_irs", Name: st.IRS,
-				StateCode: st.Code, Status: "seeded"}
-		}
-	}
-}
-
-func (s *AuthorityStore) saveLocked() error {
-	rows := make([]*Authority, 0, len(s.byID))
-	for _, a := range s.byID {
-		rows = append(rows, a)
-	}
-	sort.Slice(rows, func(i, j int) bool { return rows[i].ID < rows[j].ID })
-	if s.pg != nil {
-		ctx := context.Background()
-		for _, a := range rows {
-			doc, err := json.Marshal(a)
-			if err != nil {
-				return err
-			}
-			if err := s.pg.UpsertDoc(ctx, AuthoritiesTable, a.ID, doc); err != nil {
-				return fmt.Errorf("postgres upsert authority %s: %w", a.ID, err)
-			}
-		}
-		return nil
-	}
-	data, _ := json.MarshalIndent(rows, "", "  ")
-	return os.WriteFile(s.path, data, 0o644)
-}
-
-func (s *AuthorityStore) List() []*Authority {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	rows := make([]*Authority, 0, len(s.byID))
-	for _, a := range s.byID {
-		rows = append(rows, a)
+	now := time.Now().UTC()
+	seeds := []Authority{
+		{ID: "NRS", Kind: "nrs", Name: "Nigerian Revenue Service", Status: "active"},
+		{ID: "JRB-SEC", Kind: "jrb_secretariat", Name: "Joint Revenue Board Secretariat", Status: "active"},
 	}
-	sort.Slice(rows, func(i, j int) bool { return rows[i].ID < rows[j].ID })
-	return rows
+	for _, st := range nigerianStates {
+		seeds = append(seeds, Authority{ID: st.Code, Kind: "state_irs", Name: st.Name, Status: "seeded"})
+	}
+	for _, a := range seeds {
+		if _, ok := s.byID[a.ID]; ok {
+			continue
+		}
+		a.CreatedAt, a.UpdatedAt = now, now
+		s.byID[a.ID] = &a
+		_ = s.persistLocked(&a)
+	}
+}
+
+func (s *AuthorityStore) persistLocked(a *Authority) error {
+	data, err := json.MarshalIndent(a, "", "  ")
+	if err != nil {
+		return err
+	}
+	if s.pg != nil {
+		return s.pg.UpsertDoc(context.Background(), AuthoritiesTable, a.ID, data)
+	}
+	return os.WriteFile(filepath.Join(s.dir, a.ID+".json"), data, 0o644)
+}
+
+func (s *AuthorityStore) List() []Authority {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	out := make([]Authority, 0, len(s.byID))
+	for _, a := range s.byID {
+		out = append(out, *a)
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].ID < out[j].ID })
+	return out
 }
 
 func (s *AuthorityStore) Get(id string) (*Authority, bool) {
@@ -137,8 +156,14 @@ func (s *AuthorityStore) Get(id string) (*Authority, bool) {
 func (s *AuthorityStore) Upsert(a *Authority) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	if cur, ok := s.byID[a.ID]; ok {
+		a.CreatedAt = cur.CreatedAt
+	} else {
+		a.CreatedAt = time.Now().UTC()
+	}
+	a.UpdatedAt = time.Now().UTC()
 	s.byID[a.ID] = a
-	return s.saveLocked()
+	return s.persistLocked(a)
 }
 
 func (s *AuthorityStore) Delete(id string) error {
@@ -146,60 +171,83 @@ func (s *AuthorityStore) Delete(id string) error {
 	defer s.mu.Unlock()
 	delete(s.byID, id)
 	if s.pg != nil {
-		if err := s.pg.DeleteDoc(context.Background(), AuthoritiesTable, id); err != nil {
-			return err
-		}
+		return s.pg.DeleteDoc(context.Background(), AuthoritiesTable, id)
 	}
-	return s.saveLocked()
+	return os.Remove(filepath.Join(s.dir, id+".json"))
 }
 
-// Onboard processes an authority onboarding: dev profile accepts a PEM client
-// certificate and records its SHA-256 fingerprint; production uses mTLS (notes
-// recorded on the authority record).
-func (s *AuthorityStore) Onboard(id, certPEM string) (*Authority, error) {
-	a, ok := s.Get(id)
-	if !ok {
-		return nil, fmt.Errorf("unknown authority %s", id)
+// certFingerprint computes SHA-256 over the DER bytes of a PEM certificate.
+func certFingerprint(pemStr string) (string, error) {
+	var der []byte
+	rest := []byte(pemStr)
+	for {
+		var block *struct {
+			Type  string
+			Bytes []byte
+		}
+		_ = block
+		b, r := pemDecode(rest)
+		if b == nil {
+			break
+		}
+		if b.Type == "CERTIFICATE" {
+			der = b.Bytes
+			break
+		}
+		rest = r
 	}
-	fp, subject, err := certFingerprint(certPEM)
+	if der == nil {
+		return "", errors.New("no CERTIFICATE PEM block found")
+	}
+	sum := sha256.Sum256(der)
+	return hex.EncodeToString(sum[:]), nil
+}
+
+// pemBlock mirrors encoding/pem.Block without importing twice.
+type pemBlock struct {
+	Type  string
+	Bytes []byte
+}
+
+// Onboard registers an authority with a dev cert upload + fingerprint.
+// Prod onboarding (mTLS + OIDC) is recorded via OnboardingNotes.
+func (s *AuthorityStore) Onboard(id, certPEM string) (*Authority, error) {
+	fp, err := certFingerprint(certPEM)
 	if err != nil {
 		return nil, err
 	}
-	a.Status = "active"
-	a.CertFingerprint = fp
-	a.OnboardedAt = time.Now().UTC().Format(time.RFC3339)
-	a.MTLSNotes = prodMTLSNotes + " Dev cert subject: " + subject
-	return a, s.Upsert(a)
-}
-
-// certFingerprint validates the PEM and returns the SHA-256 fingerprint of the
-// DER bytes plus the certificate subject.
-func certFingerprint(certPEM string) (string, string, error) {
-	block, _ := pem.Decode([]byte(certPEM))
-	if block == nil || block.Type != "CERTIFICATE" {
-		return "", "", fmt.Errorf("invalid PEM: expected CERTIFICATE block")
-	}
-	cert, err := x509.ParseCertificate(block.Bytes)
-	if err != nil {
-		return "", "", fmt.Errorf("cannot parse certificate: %w", err)
-	}
-	sum := sha256.Sum256(cert.Raw)
-	return hex.EncodeToString(sum[:]), cert.Subject.String(), nil
-}
-
-// RotateCert replaces an authority certificate (wf-jrb-cert-rotate activity):
-// old fingerprint is invalidated, new one recorded.
-func (s *AuthorityStore) RotateCert(id, newCertPEM string) (*Authority, string, error) {
-	a, ok := s.Get(id)
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	a, ok := s.byID[id]
 	if !ok {
-		return nil, "", fmt.Errorf("unknown authority %s", id)
+		return nil, fmt.Errorf("unknown authority %q", id)
 	}
-	old := a.CertFingerprint
-	fp, subject, err := certFingerprint(newCertPEM)
+	a.CertFingerprint = fp
+	a.Status = "active"
+	a.OnboardedAt = time.Now().UTC().Format(time.RFC3339)
+	a.OnboardingNotes = "dev: cert upload + sha256 fingerprint; prod: mTLS + OIDC"
+	a.UpdatedAt = time.Now().UTC()
+	return a, s.persistLocked(a)
+}
+
+// RotateCert replaces an authority certificate, revoking the old fingerprint.
+func (s *AuthorityStore) RotateCert(id, certPEM string) (*Authority, string, error) {
+	fp, err := certFingerprint(certPEM)
 	if err != nil {
 		return nil, "", err
 	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	a, ok := s.byID[id]
+	if !ok {
+		return nil, "", fmt.Errorf("unknown authority %q", id)
+	}
+	old := a.CertFingerprint
 	a.CertFingerprint = fp
-	a.MTLSNotes = prodMTLSNotes + " Dev cert subject: " + subject
-	return a, old, s.Upsert(a)
+	a.OnboardedAt = time.Now().UTC().Format(time.RFC3339)
+	a.UpdatedAt = time.Now().UTC()
+	return a, old, s.persistLocked(a)
 }
+
+// compile-time assertion that storex.DB satisfies pgDocStore when wired.
+var _ pgDocStore = (*storex.DB)(nil)
