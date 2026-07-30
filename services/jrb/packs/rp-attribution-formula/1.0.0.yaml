@@ -1,0 +1,26 @@
+id: rp-attribution-formula
+version: 1.0.0
+effective_from: 2026-01-01
+effective_to: null
+status: published
+subject_to_regazette: true
+provenance:
+  as_passed: "Nigeria Tax Administration Act 2025 — VAT revenue attribution: place of consumption"
+  as_gazetted: null
+  source_citation: "NTAA 2025 s. VAT attribution formula"
+rules:
+  - id: attr.vat.state_share
+    when: { revenue_type: vat }
+    then:
+      formula: "state_share_kobo = pool_kobo * state_consumption_bps / 10000"
+      place_of_consumption_weight_bps: 3000
+      narrate: "30% of the distributable VAT pool follows the place-of-consumption attribution"
+  - id: attr.vat.residual
+    when: { revenue_type: vat }
+    then:
+      formula: "residual_share_kobo = pool_kobo * residual_bps / 10000 split by equality_and_derivation"
+      residual_bps: 7000
+      narrate: "Remaining 70% shared on equality (50%) and derivation (50%) bases"
+  - id: attr.feed.integrity
+    when: { output: attribution_feed }
+    then: { signed: true, algorithm: ed25519, narrate: "Attribution feeds are signed before cross-zone serving (F7)" }
