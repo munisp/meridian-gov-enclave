@@ -18,6 +18,7 @@ type Config struct {
 	AuditEvidenceURL string // core audit-evidence API; empty -> local WORM fallback
 	RegWatchURL      string // core reg-watch API; empty -> local gate file fallback
 	PacksDir         string
+	DatabaseURL      string // H1: postgres://... ; empty -> embedded JSON stores
 }
 
 func getenv(k, def string) string {
@@ -40,6 +41,7 @@ func loadConfig() Config {
 		AuditEvidenceURL: os.Getenv("AUDIT_EVIDENCE_URL"),
 		RegWatchURL:      os.Getenv("REG_WATCH_URL"),
 		PacksDir:         getenv("PACKS_DIR", "packs"),
+		DatabaseURL:      os.Getenv("DATABASE_URL"),
 	}
 }
 
