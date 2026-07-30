@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"crypto/sha256"
 	"crypto/x509"
 	"encoding/hex"
@@ -12,6 +13,8 @@ import (
 	"sort"
 	"sync"
 	"time"
+
+	"github.com/munisp/meridian-gov-enclave/packages/storex"
 )
 
 // Authority is a member of the Joint Revenue Board registry: NRS, the JRB
@@ -31,18 +34,36 @@ const prodMTLSNotes = "PROD: authority presents an X.509 client certificate issu
 	"JRB PKI; mTLS both directions plus OIDC client-credentials. Dev profile accepts a PEM " +
 	"cert upload and records its SHA-256 fingerprint instead."
 
+// AuthoritiesTable is the Postgres table (H3 DDL, idempotent auto-migrate).
+const AuthoritiesTable = "jrb_authorities"
+
 type AuthorityStore struct {
 	mu   sync.Mutex
 	path string
 	byID map[string]*Authority
+	pg   *storex.DB // nil -> JSON-file dev fallback
 }
 
-func NewAuthorityStore(root string) (*AuthorityStore, error) {
+// NewAuthorityStore opens the store. When pg is non-nil (DATABASE_URL set) the
+// canonical rows live in Postgres (jrb_authorities, JSONB docs matching the
+// JSON file schema); otherwise the embedded JSON file is used.
+func NewAuthorityStore(root string, pg *storex.DB) (*AuthorityStore, error) {
 	if err := os.MkdirAll(root, 0o755); err != nil {
 		return nil, err
 	}
-	s := &AuthorityStore{path: filepath.Join(root, "authorities.json"), byID: map[string]*Authority{}}
-	if data, err := os.ReadFile(s.path); err == nil {
+	s := &AuthorityStore{path: filepath.Join(root, "authorities.json"), byID: map[string]*Authority{}, pg: pg}
+	if pg != nil {
+		docs, err := pg.LoadDocs(context.Background(), AuthoritiesTable)
+		if err != nil {
+			return nil, fmt.Errorf("load authorities from postgres: %w", err)
+		}
+		for id, doc := range docs {
+			var a Authority
+			if json.Unmarshal(doc, &a) == nil {
+				s.byID[id] = &a
+			}
+		}
+	} else if data, err := os.ReadFile(s.path); err == nil {
 		var rows []*Authority
 		if json.Unmarshal(data, &rows) == nil {
 			for _, r := range rows {
@@ -78,6 +99,19 @@ func (s *AuthorityStore) saveLocked() error {
 		rows = append(rows, a)
 	}
 	sort.Slice(rows, func(i, j int) bool { return rows[i].ID < rows[j].ID })
+	if s.pg != nil {
+		ctx := context.Background()
+		for _, a := range rows {
+			doc, err := json.Marshal(a)
+			if err != nil {
+				return err
+			}
+			if err := s.pg.UpsertDoc(ctx, AuthoritiesTable, a.ID, doc); err != nil {
+				return fmt.Errorf("postgres upsert authority %s: %w", a.ID, err)
+			}
+		}
+		return nil
+	}
 	data, _ := json.MarshalIndent(rows, "", "  ")
 	return os.WriteFile(s.path, data, 0o644)
 }
@@ -111,6 +145,11 @@ func (s *AuthorityStore) Delete(id string) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	delete(s.byID, id)
+	if s.pg != nil {
+		if err := s.pg.DeleteDoc(context.Background(), AuthoritiesTable, id); err != nil {
+			return err
+		}
+	}
 	return s.saveLocked()
 }
 
