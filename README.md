@@ -1,21 +1,156 @@
 # meridian-gov-enclave
 
-**Meridian Gov Enclave: NRS analytics (T4), JRB harmonisation (T11), institutional case mgmt (T13), customs rails (T15) — sovereign deployment.**
+Sovereign-zone services for the **Meridian TaxTech platform** (Nigerian NRS unified
+tax platform). This repo is deliberately separate (sovereignty boundary): it holds
+the government enclave services, the audited cross-zone API gateway, and the
+government consoles. Contract: `SPEC.md` §5 (this repo pins core contracts v1).
 
-## Purpose
-Sovereign-deployed enclave for revenue authorities: NRS analytics, Joint Revenue Board harmonisation, institutional case management, and customs rails. Deployed inside government trust boundaries with no external data egress.
+## Architecture
 
-## Plane mapping
-- **Data plane:** NRS analytics (T4), customs rails data (T15)
-- **Control plane:** JRB harmonisation (T11), institutional case mgmt (T13)
-- Sovereign deployment: air-gappable, gov-cloud compatible
-- Shares rule packs via `meridian-rule-packs` and platform services via `meridian-core-platform`.
+```
+            Market Zone / external rails
+                      │  (sole north-south path)
+        ┌─────────────▼──────────────┐
+        │  services/enclave-gateway  │  F1–F8 audited flows, schema validate →
+        │  (Go, :8400)               │  scope check → synchronous WORM receipt
+        │  F9/F10 FORBIDDEN          │  → dispatch. F9/F10 denied by construction.
+        └─────────────┬──────────────┘
+                      │ enclave-internal (F6 EOI)
+   ┌──────────────────┼─────────────────────┬───────────────────┐
+   ▼                  ▼                     ▼                   ▼
+services/analytics  services/jrb         services/ombud   (core services:
+(Python, :8401)     (Go, :8402)          (Go, :8403)      tin-graph, ledger,
+T4+T15 lakehouse    T11 authority        T13i case        audit-evidence,
++ scoring + NSW     registry, EOI,       registry,        reg-watch consumed
+customs products    adapters, NTAA       deposits (500),  via HTTP when URLs
+                    attribution feeds    evidence packs   set; local fallbacks
+                                                         otherwise)
+                      │
+        consoles/gov-console (React 18 + TS + Vite + Tailwind, :8404)
+        NRS console · JRB console · state-IRS portal view · Ombud registry
+```
 
-## Sibling repositories
-- [meridian-core-platform](https://github.com/munisp/meridian-core-platform)
-- [meridian-compliance-suite](https://github.com/munisp/meridian-compliance-suite)
-- [meridian-inclusion-suite](https://github.com/munisp/meridian-inclusion-suite)
-- [meridian-rule-packs](https://github.com/munisp/meridian-rule-packs)
-- [meridian-docs](https://github.com/munisp/meridian-docs)
+### services/analytics (T4 + T15, Python FastAPI)
 
-**Status:** scaffold
+- **Lakehouse-lite**: bronze/silver/gold zones as date-partitioned parquet via
+  DuckDB (`app/lakehouse.py`). Interface is named `Lakehouse` so an Iceberg/Trino
+  implementation can be swapped in (`LAKEHOUSE_IMPL` env). Gold zone stores
+  `pseudo_tin` only (HMAC-SHA256 with `TIN_HMAC_KEY`, SPEC §1.3).
+- **Ingest**: `POST /ingest/mbs/taxview`, `POST /ingest/filings-mou`,
+  `POST /ingest/cac/registry`, `POST /ingest/import-vat/declarations`,
+  `POST /ingest/nsw/declarations` (T15: validated bronze → silver
+  `customs_declarations` with importer-TIN reconciliation vs core tin-graph API
+  (local fallback) → gold `import_vat_landing_cost` product, VAT 7.5%).
+- **Features**: `fv_filing_divergence_30d`, `fv_import_mismatch_ytd`,
+  `fv_graph_risk_90d` (`POST /v1/features/materialise`).
+- **Scoring**: transparent additive rule+score model (`app/scoring.py`); every
+  score has a mandatory explanation payload (`GET /v1/scores/{ptin}/explanation`)
+  with per-rule points, narrative, evidence, model + rule-pack versions.
+- **Disclosure control**: `rp-disclosure-control` (embedded fallback pack)
+  k-anonymity (k=5) + dominance rule enforced on aggregate outputs
+  (`GET /v1/aggregates/risk-by-band` — small cells suppressed).
+- **Workflows** (in-proc dev runner, Temporal-shaped): `wf-daily-scoring`,
+  `wf-entity-resolution`, `wf-feature-filing-divergence|import-mismatch|graph-risk`.
+- **Case feed**: `GET /v1/cases/feed` in the `nrs.cases.feed.v1` envelope shape
+  (SPEC §1.1).
+
+### services/jrb (T11, Go)
+
+- `authority_registry` CRUD seeded with NRS, JRB secretariat, 36 states + FCT.
+- Authority onboarding: dev = PEM cert upload + SHA-256 fingerprint; prod = mTLS
+  both directions + OIDC (notes recorded on the authority record).
+- **EOI** with four-party visibility enforced in the store (requester +
+  responder + secretariat; ANY fourth party hard-denied — proven in tests).
+- Per-state adapter framework (`StateAdapter`) with `lagos_lirs` and `fct_irs`
+  reference adapters (simulated) + generic fallback covering all states.
+- **Attribution feed builder**: NTAA 30% place-of-consumption from
+  `rp-attribution-formula` (embedded fallback pack), residual 70% split
+  equality/derivation; ed25519-signed output; gateway F7 verifies before serving.
+- `wf-jrb-onboard|route|reconcile|eoi|joint-audit|cert-rotate|single-filing|attribution-publish`.
+- Cross-zone sends **only** via enclave-gateway F6 with WORM receipt capture
+  (`GatewayClient`); local simulated receipt when gateway unset (tagged).
+
+### services/ombud (T13 institutional, Go)
+
+- Case registry: intake → `received → acknowledged → under_review → hearing →
+  decided → closed` (sequential), deadlines from `rp-procedure-ombud`
+  (ack 7d, decide 90d).
+- **Deposit tracker**: 20% of disputed amount (`rp-deposit-20pct`) as a hold on
+  ledger 500 via the core ledger API (`LEDGER_URL`) or the dev in-memory
+  TigerBeetle-semantics client (codes 5 settle / 6 hold / 7 release).
+- **Evidence packs**: canonical case file → WORM (core audit-evidence API or
+  tamper-evident local fallback with chained manifest).
+- Packs loaded with embedded fallback: `rp-procedure-ombud`, `rp-procedure-tat`,
+  `rp-ntaa-penalties`, `rp-deposit-20pct`.
+- Roles `registry | clerk | member` (dev: `X-Ombud-Role`); members decide;
+  privilege-filtered search (dev index; privileged docs hidden from
+  non-privileged roles).
+- **Activation gate** on Ombud rules: reg-watch API (`REG_WATCH_URL`) or local
+  gate file fallback; decisions/deposits refused (503) while gate is off.
+
+### services/enclave-gateway (Go) — THE audited gateway
+
+- Endpoints: `POST /flows/f1/ubl-preclearance-invoices`, `/f2/b2c-reports`,
+  `/f3/carf-messages`, `/f4/etr-gir-filings`, `/f5/presumptive-remittances`;
+  `GET /flows/f7/attribution-feeds/{state}` (ed25519 signature verified before
+  serving); `GET /flows/f8/wht-credit-recon?pseudo_tin=` (pseudonymised only,
+  every read logged to `read-audit.log`); `GET /v1/receipts` (admin).
+- Pipeline per accepted message: schema validate (embedded dev subsets of the
+  relevant rp-*) → Permify-style scope check → **synchronous WORM evidence
+  receipt BEFORE the enclave consumer sees the message** → dispatch to consumer
+  API (local spool fallback).
+- F6 EOI is enclave-internal (shared token in dev; mTLS in prod profile).
+- **F9/F10 forbidden by construction**: no routes exist; deny middleware rejects
+  any `/flows/f9|f10*` path with 403; a test proves no receipt is ever issued.
+
+### consoles/gov-console (React 18 + TS + Vite + Tailwind)
+
+NRS console (scoring dashboard with explanation drill-down, case feed, NSW
+declarations), JRB console (authorities, EOI inbox with visibility banner,
+attribution feeds), state-IRS portal view (filings + attribution), Ombud
+registry console (cases, deposits, evidence packs). Dev JWT minted in the
+browser (HS256, `MERIDIAN_DEV_JWT_SECRET`). Low-saturation warm-neutral design
+(sand/clay/moss), no gradients.
+
+## Dev run
+
+```bash
+# analytics (Python 3.12)
+cd services/analytics
+python3 -m venv venv && . venv/bin/activate
+pip install -r requirements.txt
+uvicorn app.main:app --port 8401          # or: python -m app.main
+pytest tests/ -q
+
+# Go services (Go 1.23+, toolchain at $HOME/sdk/go/bin/go)
+cd services/enclave-gateway && go build ./... && go test ./... && go run .   # :8400
+cd services/jrb             && go build ./... && go test ./... && go run .   # :8402
+cd services/ombud           && go build ./... && go test ./... && go run .   # :8403
+
+# console (Node 20)
+cd consoles/gov-console
+npm install && npm run build
+npm run dev                                # :8404, proxies /api/* to services
+```
+
+Auth in dev: `X-Dev-Role: admin|operator|auditor` header or HS256 JWT with
+`MERIDIAN_DEV_JWT_SECRET` (SPEC §1.3). `docker-compose.yml` runs all four
+services + console build.
+
+## Simulated vs real (honesty tags)
+
+| Component | Status |
+|---|---|
+| Lakehouse (DuckDB parquet) | REAL dev stand-in; Iceberg/Trino swap point behind `Lakehouse` interface |
+| Scoring engine + explanations | REAL (deterministic rule+score, audit trail per score) |
+| k-anonymity / dominance suppression | REAL (rp-disclosure-control embedded fallback) |
+| tin-graph reconciliation | REAL interface; local file-backed fallback when `TIN_GRAPH_URL` unset |
+| WORM evidence (gateway + ombud) | REAL interface; local fallback is append-only + sha256 chained manifest (**simulated immutability**; prod uses object-lock via core audit-evidence) |
+| Ledger 500 deposit holds | REAL interface; dev in-memory TigerBeetle semantics (**simulated**; real when `LEDGER_URL` set) |
+| State IRS adapters (lagos_lirs, fct_irs) | **SIMULATED** reference adapters behind `StateAdapter` |
+| Attribution feed math + ed25519 signing | REAL (dev keypair persisted; prod HSM ceremony) |
+| EOI four-party visibility | REAL (store-level enforcement, tested) |
+| F9/F10 denial | REAL (no code path + deny middleware + test) |
+| Reg-watch gate (ombud) | REAL interface; local gate file fallback (**simulated** reg-watch) |
+| mTLS | Documented prod profile; dev uses JWT + cert fingerprint onboarding |
+| Workflow runners | REAL in-proc runners (Temporal dev fallback per SPEC §1.1) |

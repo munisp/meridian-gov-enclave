@@ -1,0 +1,76 @@
+# Optional dev composition. Every service also runs standalone with zero
+# external deps (SPEC §1.3). Core services (tin-graph, ledger, audit-evidence,
+# reg-watch) are optional: set the *_URL envs to wire the real implementations.
+services:
+  enclave-gateway:
+    image: golang:1.23
+    working_dir: /app
+    command: go run .
+    volumes:
+      - ./services/enclave-gateway:/app
+      - gateway-data:/data
+    environment:
+      PORT: "8400"
+      GATEWAY_DATA_ROOT: /data
+      AUTH_MODE: dev
+      # AUDIT_EVIDENCE_URL: http://audit-evidence:8007
+      # JRB_URL: http://jrb:8402
+    ports: ["8400:8400"]
+
+  analytics:
+    image: python:3.12-slim
+    working_dir: /app
+    command: sh -c "pip install -q -r requirements.txt && uvicorn app.main:app --host 0.0.0.0 --port 8401"
+    volumes:
+      - ./services/analytics:/app
+      - analytics-data:/data
+    environment:
+      PORT: "8401"
+      ANALYTICS_DATA_ROOT: /data
+      AUTH_MODE: dev
+      # TIN_GRAPH_URL: http://tin-graph:8002
+    ports: ["8401:8401"]
+
+  jrb:
+    image: golang:1.23
+    working_dir: /app
+    command: go run .
+    volumes:
+      - ./services/jrb:/app
+      - jrb-data:/data
+    environment:
+      PORT: "8402"
+      JRB_DATA_ROOT: /data
+      AUTH_MODE: dev
+      ENCLAVE_GATEWAY_URL: http://enclave-gateway:8400
+    ports: ["8402:8402"]
+
+  ombud:
+    image: golang:1.23
+    working_dir: /app
+    command: go run .
+    volumes:
+      - ./services/ombud:/app
+      - ombud-data:/data
+    environment:
+      PORT: "8403"
+      OMBUD_DATA_ROOT: /data
+      AUTH_MODE: dev
+      # LEDGER_URL: http://ledger:8005
+      # AUDIT_EVIDENCE_URL: http://audit-evidence:8007
+      # REG_WATCH_URL: http://reg-watch:8010
+    ports: ["8403:8403"]
+
+  gov-console:
+    image: node:20
+    working_dir: /app
+    command: sh -c "npm install && npm run dev -- --host 0.0.0.0"
+    volumes:
+      - ./consoles/gov-console:/app
+    ports: ["8404:8404"]
+
+volumes:
+  gateway-data:
+  analytics-data:
+  jrb-data:
+  ombud-data:
