@@ -1,0 +1,28 @@
+id: rp-disclosure-control
+version: 1.0.0
+effective_from: 2025-01-01
+effective_to: null
+status: published
+subject_to_regazette: true
+provenance:
+  as_passed: "NDPA 2023 s.26 — anonymisation/pseudonymisation duties for derived data"
+  as_gazetted: null
+  source_citation: "Meridian analytics disclosure-control baseline (T4)"
+rules:
+  - id: dc.k_anonymity.default
+    when: { output_kind: aggregate }
+    then: { k: 5, narrate: "Aggregate cells with fewer than 5 distinct pseudonymised subjects must be suppressed" }
+  - id: dc.k_anonymity.small_cell
+    when: { output_kind: aggregate, cell_count_below: 5 }
+    then: { action: suppress, narrate: "Suppress small cell; report suppressed=true" }
+  - id: dc.quasi_identifiers
+    when: { output_kind: aggregate }
+    then:
+      quasi_identifiers: [state, lga, sector, tax_type, band]
+      narrate: "Quasi-identifier combination granularity guard"
+  - id: dc.gold.pseudonym_only
+    when: { zone: gold }
+    then: { identifier: pseudo_tin, forbid: [tin, nin, rc_number], narrate: "Gold zone stores pseudo_tin only" }
+  - id: dc.dominance
+    when: { output_kind: aggregate }
+    then: { max_contributor_share_bps: 8500, narrate: "Single contributor may not exceed 85% of a published cell (dominance rule)" }
