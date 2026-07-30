@@ -16,6 +16,10 @@ import (
 	"path/filepath"
 	"strings"
 	"time"
+
+	"github.com/munisp/meridian-gov-enclave/packages/authx"
+	"github.com/munisp/meridian-gov-enclave/packages/eventx"
+	"github.com/munisp/meridian-gov-enclave/packages/storex"
 )
 
 type ctxKey string
@@ -24,6 +28,7 @@ const ctxPrincipal ctxKey = "principal"
 
 type Server struct {
 	cfg       Config
+	authn     *authx.Authenticator
 	auth      *AuthorityStore
 	eoi       *EOIStore
 	adapters  *AdapterRegistry
@@ -31,16 +36,23 @@ type Server struct {
 	signer    *FeedSigner
 	runner    *WorkflowRunner
 	gateway   *GatewayClient
+	emitter   eventx.Emitter
 	http      *http.Client
 }
 
 func main() {
 	cfg := loadConfig()
-	auth, err := NewAuthorityStore(cfg.DataRoot)
+	pg, err := storex.Open(context.Background(), cfg.DatabaseURL, "jrb",
+		storex.DocTableDDL(AuthoritiesTable), storex.DocTableDDL(EOITable))
+	if err != nil {
+		log.Fatalf("store: %v", err)
+	}
+	defer pg.Close()
+	auth, err := NewAuthorityStore(cfg.DataRoot, pg)
 	if err != nil {
 		log.Fatal(err)
 	}
-	eoiStore, err := NewEOIStore(cfg.DataRoot)
+	eoiStore, err := NewEOIStore(cfg.DataRoot, pg)
 	if err != nil {
 		log.Fatal(err)
 	}
@@ -48,10 +60,13 @@ func main() {
 	if err != nil {
 		log.Fatal(err)
 	}
+	emitter := eventx.New("jrb", cfg.DataRoot)
+	defer emitter.Close()
 	s := &Server{
-		cfg: cfg, auth: auth, eoi: eoiStore, adapters: NewAdapterRegistry(),
+		cfg: cfg, authn: newAuthenticator(cfg), auth: auth, eoi: eoiStore, adapters: NewAdapterRegistry(),
 		formula: LoadAttributionFormula(cfg.PacksDir), signer: signer,
 		runner: NewWorkflowRunner(), http: &http.Client{Timeout: 10 * time.Second},
+		emitter: emitter,
 		gateway: &GatewayClient{base: cfg.EnclaveGatewayURL, token: cfg.InternalFlowToken,
 			http: &http.Client{Timeout: 10 * time.Second}},
 	}
@@ -92,7 +107,7 @@ func (s *Server) readyz(w http.ResponseWriter, _ *http.Request) {
 
 func (s *Server) withAuth(next http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		p := principalFrom(r, s.cfg)
+		p := s.authn.PrincipalFrom(r)
 		if p == nil {
 			writeProblem(w, http.StatusUnauthorized, "Unauthorized", "Bearer JWT or X-Dev-Role (dev) required")
 			return
@@ -163,6 +178,13 @@ func (s *Server) onboardAuthority(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		writeProblem(w, http.StatusBadRequest, "Onboarding failed", err.Error())
 		return
+	}
+	if s.emitter != nil {
+		_ = s.emitter.Emit(r.Context(), "nrs.jrb.onboard.v1", eventx.Envelope{
+			Type: "nrs.jrb.onboard.v1",
+			Data: map[string]any{"authority_id": a.ID, "kind": a.Kind, "status": a.Status,
+				"cert_fingerprint": a.CertFingerprint},
+		})
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"authority": a,
 		"note": "dev profile: cert upload + SHA-256 fingerprint; prod profile: mTLS both directions + OIDC"})
@@ -300,6 +322,13 @@ func (s *Server) buildFeed(w http.ResponseWriter, r *http.Request) {
 	if err := s.saveFeed(body.Period, doc); err != nil {
 		writeProblem(w, http.StatusInternalServerError, "Store error", err.Error())
 		return
+	}
+	if s.emitter != nil {
+		_ = s.emitter.Emit(r.Context(), "nrs.jrb.attribution.v1", eventx.Envelope{
+			Type: "nrs.jrb.attribution.v1",
+			Data: map[string]any{"period": body.Period, "pool_kobo": body.PoolKobo,
+				"formula_pack": s.formula.PackRef},
+		})
 	}
 	writeJSON(w, http.StatusCreated, map[string]any{"feed": feed, "signature": doc.Signature,
 		"public_key": doc.PublicKey, "formula_pack": s.formula.PackRef,
