@@ -19,14 +19,14 @@ import (
 
 // Envelope is the SPEC 1.1 event envelope.
 type Envelope struct {
-	ID        string         `json:"id"`
-	Type      string         `json:"type"`
-	Source    string         `json:"source"`
-	Time      string         `json:"time"`
-	TenantID  string         `json:"tenant_id,omitempty"`
-	TraceID   string         `json:"trace_id,omitempty"`
-	RulePackV string         `json:"rule_pack_version,omitempty"`
-	Data      map[string]any `json:"data"`
+	ID         string         `json:"id"`
+	Type       string         `json:"type"`
+	Source     string         `json:"source"`
+	Time       string         `json:"time"`
+	TenantID   string         `json:"tenant_id,omitempty"`
+	TraceID    string         `json:"trace_id,omitempty"`
+	RulePackV  string         `json:"rule_pack_version,omitempty"`
+	Data       map[string]any `json:"data"`
 }
 
 // Emitter publishes envelopes to a topic.
@@ -100,7 +100,7 @@ type kafkaEmitter struct {
 func newKafkaEmitter(source, brokers string) (*kafkaEmitter, error) {
 	client, err := kgo.NewClient(
 		kgo.SeedBrokers(splitCSV(brokers)...),
-		kgo.ProducerBatchMaxBytes(1<<20),
+		kgo.ProducerBatchMaxBytes(1 << 20),
 		kgo.RequiredAcks(kgo.AllISRAcks()),
 	)
 	if err != nil {
