@@ -25,6 +25,11 @@ type EvidenceReceipt struct {
 	Mode       string `json:"mode"` // audit-evidence-api | local-worm
 	Flow       string `json:"flow"`
 	MessageID  string `json:"message_id"`
+	// Signature is the hex ed25519 signature over the canonical receipt
+	// string (receiptCanonical), present when a receipt signing key is
+	// configured (KEY_PROVIDER). PublicKey is the hex verification key.
+	Signature string `json:"signature,omitempty"`
+	PublicKey string `json:"public_key,omitempty"`
 }
 
 // WORMStore is the write-once evidence interface (core audit-evidence API or
@@ -39,11 +44,15 @@ type WORMStore interface {
 type APIWORMStore struct {
 	base   string
 	client *http.Client
+	signer *ReceiptSigner // nil: unsigned receipts (legacy dev)
 }
 
 func NewAPIWORMStore(base string) *APIWORMStore {
 	return &APIWORMStore{base: base, client: &http.Client{Timeout: 8 * time.Second}}
 }
+
+// SetReceiptSigner attaches a receipt signer (startup wiring).
+func (s *APIWORMStore) SetReceiptSigner(rs *ReceiptSigner) { s.signer = rs }
 
 func (s *APIWORMStore) Mode() string { return "audit-evidence-api" }
 
@@ -68,11 +77,17 @@ func (s *APIWORMStore) Store(flow, messageID string, payload []byte) (*EvidenceR
 	if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
 		return nil, err
 	}
-	return &EvidenceReceipt{
+	receipt := &EvidenceReceipt{
 		EvidenceID: out.EvidenceID, SHA256: hex.EncodeToString(sum[:]),
 		WormURI: out.WormURI, Immutable: true, StoredAt: time.Now().UTC().Format(time.RFC3339),
 		Mode: s.Mode(), Flow: flow, MessageID: messageID,
-	}, nil
+	}
+	if s.signer != nil {
+		if err := s.signer.Sign(receipt); err != nil {
+			return nil, err // fail-closed: no unsigned receipt is issued
+		}
+	}
+	return receipt, nil
 }
 
 func base64Encode(b []byte) string {
@@ -110,8 +125,9 @@ func base64Encode(b []byte) string {
 // storage.
 
 type LocalWORMStore struct {
-	dir string
-	mu  sync.Mutex
+	dir    string
+	mu     sync.Mutex
+	signer *ReceiptSigner // nil: unsigned receipts (legacy dev)
 }
 
 func NewLocalWORMStore(root string) (*LocalWORMStore, error) {
@@ -121,6 +137,10 @@ func NewLocalWORMStore(root string) (*LocalWORMStore, error) {
 	}
 	return &LocalWORMStore{dir: dir}, nil
 }
+
+// SetReceiptSigner attaches a receipt signer (HSM/KMS provider-backed or
+// software dev key). Called during startup wiring.
+func (s *LocalWORMStore) SetReceiptSigner(rs *ReceiptSigner) { s.signer = rs }
 
 func (s *LocalWORMStore) Mode() string { return "local-worm" }
 
@@ -138,6 +158,11 @@ func (s *LocalWORMStore) Store(flow, messageID string, payload []byte) (*Evidenc
 		WormURI: "worm://local/" + id, Immutable: true,
 		StoredAt: time.Now().UTC().Format(time.RFC3339),
 		Mode:     s.Mode(), Flow: flow, MessageID: messageID,
+	}
+	if s.signer != nil {
+		if err := s.signer.Sign(receipt); err != nil {
+			return nil, err // fail-closed: no unsigned receipt is persisted
+		}
 	}
 	obj := map[string]any{
 		"receipt": receipt,
