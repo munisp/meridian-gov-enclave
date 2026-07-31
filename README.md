@@ -18,14 +18,20 @@ government consoles. Contract: `SPEC.md` §5 (this repo pins core contracts v1).
                       │ enclave-internal (F6 EOI)
    ┌──────────────────┼─────────────────────┬───────────────────┐
    ▼                  ▼                     ▼                   ▼
-services/analytics  services/jrb         services/ombud   (core services:
-(Python, :8401)     (Go, :8402)          (Go, :8403)      tin-graph, ledger,
-T4+T15 lakehouse    T11 authority        T13i case        audit-evidence,
-+ scoring + NSW     registry, EOI,       registry,        reg-watch consumed
-customs products    adapters, NTAA       deposits (500),  via HTTP when URLs
-                    attribution feeds    evidence packs   set; local fallbacks
-                                                         otherwise)
+services/analytics  services/jrb         services/ombud   services/hermes
+(Python, :8401)     (Go, :8402)          (Go, :8403)      (Python, :8405)
+T4+T15 lakehouse    T11 authority        T13i case        agentic copilots
++ scoring + NSW     registry, EOI,       registry,        (SPEC D) + core:
+customs products    adapters, NTAA       deposits (500),  tin-graph, ledger,
+                    attribution feeds    evidence packs   audit-evidence,
+                                                          reg-watch consumed
+                                                          via HTTP when URLs
+                                                          set; local fallbacks
+                                                          otherwise)
                       │
+        services/hermes (Python FastAPI, :8405): SPEC D agentic copilots
+        (taxpayer / auditor / ops / policy / onboarding), ollama tool-use,
+        guardrailed + hash-chained audit to hermes.toolcalls.v1
         consoles/gov-console (React 18 + TS + Vite + Tailwind, :8404)
         NRS console · JRB console · state-IRS portal view · Ombud registry
 ```
@@ -111,6 +117,7 @@ attribution feeds), state-IRS portal view (filings + attribution), Ombud
 registry console (cases, deposits, evidence packs). Dev JWT minted in the
 browser (HS256, `MERIDIAN_DEV_JWT_SECRET`). Low-saturation warm-neutral design
 (sand/clay/moss), no gradients.
+
 
 ## Dev run
 
