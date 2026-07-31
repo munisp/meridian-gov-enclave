@@ -1,0 +1,61 @@
+# Enclave CiliumNetworkPolicies (SPEC C section 3) — authoritative copy for
+# the sovereign zone. Mirrors the mTLS service map in gov-enclave docs:
+# identity (SPIFFE/mTLS) authenticates, CNP restricts reachability.
+# Apply BEFORE policyEnforcementMode=always (see core infra/cilium/ROLLOUT.md).
+apiVersion: cilium.io/v2
+kind: CiliumNetworkPolicy
+metadata:
+  name: enclave-lockdown
+  namespace: enclave
+spec:
+  endpointSelector: {}
+  ingress:
+    # Only the enclave-gateway (meridian-core) may reach enclave services.
+    - fromEndpoints:
+        - matchLabels:
+            k8s:io.kubernetes.pod.namespace: meridian-core
+            app: enclave-gateway
+      toPorts:
+        - ports:
+            - {port: "8443", protocol: TCP}
+  egress:
+    # DNS restricted to enclave-local names only.
+    - toEndpoints:
+        - matchLabels:
+            k8s:io.kubernetes.pod.namespace: kube-system
+            k8s-app: kube-dns
+      toPorts:
+        - ports:
+            - {port: "53", protocol: ANY}
+          rules:
+            dns:
+              - matchPattern: "*.enclave.svc.cluster.local"
+    # WORM evidence store access only.
+    - toEndpoints:
+        - matchLabels:
+            k8s:io.kubernetes.pod.namespace: data
+            app: minio-enclave
+      toPorts:
+        - ports:
+            - {port: "9000", protocol: TCP}
+  # No internet egress, ever.
+  egressDeny:
+    - toCIDR:
+        - 0.0.0.0/0
+---
+# Prometheus scraping allowed so enclave drops/flows stay auditable.
+apiVersion: cilium.io/v2
+kind: CiliumNetworkPolicy
+metadata:
+  name: enclave-allow-monitoring
+  namespace: enclave
+spec:
+  endpointSelector: {}
+  ingress:
+    - fromEndpoints:
+        - matchLabels:
+            k8s:io.kubernetes.pod.namespace: monitoring
+            app: prometheus
+      toPorts:
+        - ports:
+            - {port: "9090", protocol: TCP}
