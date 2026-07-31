@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useState } from 'react'
 import { api, Session, short } from '../api'
-import { Badge, Card, Empty, ErrorBox, PageTitle } from '../components/ui'
+import { Badge, Card, Empty, ErrorBox, PageTitle, SkeletonRows } from '../components/ui'
 
 interface EOI {
   id: string
@@ -21,6 +21,7 @@ export default function EoiInbox({ session }: { session: Session }) {
   const [error, setError] = useState<string | null>(null)
   const [form, setForm] = useState({ responder_id: 'NG-KN', subject_pseudo_tin: '', purpose: '', request: '' })
   const [msg, setMsg] = useState<string | null>(null)
+  const [loading, setLoading] = useState(true)
 
   const load = useCallback(async () => {
     try {
@@ -28,8 +29,10 @@ export default function EoiInbox({ session }: { session: Session }) {
       setItems(data.items || [])
       setBanner(data.visibility_banner)
       setError(null)
+      setLoading(false)
     } catch (e) {
       setError((e as Error).message)
+      setLoading(false)
     }
   }, [session])
 
@@ -56,14 +59,15 @@ export default function EoiInbox({ session }: { session: Session }) {
   return (
     <div>
       <PageTitle title="EOI inbox" sub="Exchange of information between authorities (F6: enclave-internal)." />
-      <div className="mb-4 rounded-lg border border-moss-500/40 bg-moss-100 px-4 py-2 text-sm text-moss-700">
+      <div className="mb-4 rounded-lg border border-success-strong/40 bg-success px-4 py-2 text-sm text-success-on">
         {banner || 'Four-party visibility: requester + responder + secretariat only.'}
       </div>
       <ErrorBox error={error} />
       <Card className="mb-4">
-        <h2 className="mb-2 text-sm font-semibold text-sand-700">New exchange (as {session.authorityId})</h2>
+        <h2 className="mb-2 text-sm font-semibold text-stone-900">New exchange (as {session.authorityId})</h2>
         <div className="grid grid-cols-2 gap-2">
           <select
+            aria-label="Responder authority"
             className="input"
             value={form.responder_id}
             onChange={(e) => setForm({ ...form, responder_id: e.target.value })}
@@ -75,18 +79,21 @@ export default function EoiInbox({ session }: { session: Session }) {
               ))}
           </select>
           <input
+            aria-label="Subject pseudonymised TIN"
             className="input font-mono"
             placeholder="subject ptin_…"
             value={form.subject_pseudo_tin}
             onChange={(e) => setForm({ ...form, subject_pseudo_tin: e.target.value })}
           />
           <input
+            aria-label="Purpose"
             className="input"
             placeholder="purpose (e.g. VAT audit)"
             value={form.purpose}
             onChange={(e) => setForm({ ...form, purpose: e.target.value })}
           />
           <input
+            aria-label="Request summary"
             className="input"
             placeholder="request summary"
             value={form.request}
@@ -101,27 +108,29 @@ export default function EoiInbox({ session }: { session: Session }) {
           >
             Send via enclave-gateway (F6)
           </button>
-          {msg && <span className="text-sm text-moss-600">{msg}</span>}
+          {msg && <span aria-live="polite" className="text-sm text-success-strong">{msg}</span>}
         </div>
       </Card>
       <Card>
-        {items.length === 0 ? (
-          <Empty>Nothing visible to this authority.</Empty>
+        {loading ? (
+          <div aria-busy="true" aria-label="Loading exchanges"><SkeletonRows /></div>
+        ) : items.length === 0 ? (
+          <Empty title="Nothing visible">No exchanges are visible to this authority.</Empty>
         ) : (
           <table className="w-full">
             <thead>
-              <tr className="border-b border-sand-200">
-                <th className="th">EOI</th>
-                <th className="th">Requester → Responder</th>
-                <th className="th">Subject</th>
-                <th className="th">Purpose</th>
-                <th className="th">Status</th>
-                <th className="th">WORM receipt</th>
+              <tr className="border-b border-neutral-200">
+                <th scope="col" className="th">EOI</th>
+                <th scope="col" className="th">Requester → Responder</th>
+                <th scope="col" className="th">Subject</th>
+                <th scope="col" className="th">Purpose</th>
+                <th scope="col" className="th">Status</th>
+                <th scope="col" className="th">WORM receipt</th>
               </tr>
             </thead>
             <tbody>
               {items.map((e) => (
-                <tr key={e.id} className="border-b border-sand-100 hover:bg-sand-50">
+                <tr key={e.id} className="border-b border-neutral-100 hover:bg-neutral-50">
                   <td className="td font-mono text-xs">{e.id}</td>
                   <td className="td text-xs">
                     {e.requester_id} → {e.responder_id}
@@ -131,7 +140,7 @@ export default function EoiInbox({ session }: { session: Session }) {
                   <td className="td">
                     <Badge tone={e.status === 'answered' ? 'green' : 'amber'}>{e.status}</Badge>
                   </td>
-                  <td className="td font-mono text-xs text-sand-500">{short(e.gateway_receipt || '', 18)}</td>
+                  <td className="td font-mono text-xs text-stone-600">{short(e.gateway_receipt || '', 18)}</td>
                 </tr>
               ))}
             </tbody>

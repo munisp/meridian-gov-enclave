@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useState } from 'react'
 import { api, fmtKobo, Session } from '../api'
-import { Badge, Card, Empty, ErrorBox, PageTitle } from '../components/ui'
+import { Badge, Card, Empty, ErrorBox, PageTitle, SkeletonRows } from '../components/ui'
+import MoneyInput from '../components/MoneyInput'
 
 interface OmbudCase {
   id: string
@@ -33,7 +34,9 @@ export default function OmbudCases({ session }: { session: Session }) {
   const [cases, setCases] = useState<OmbudCase[]>([])
   const [gate, setGate] = useState<Gate | null>(null)
   const [error, setError] = useState<string | null>(null)
-  const [form, setForm] = useState({ appellant_pseudo_tin: '', authority: 'NRS', tax_type: 'CIT', amount: '', grounds: '' })
+  const [form, setForm] = useState({ appellant_pseudo_tin: '', authority: 'NRS', tax_type: 'CIT', grounds: '' })
+  const [amountKobo, setAmountKobo] = useState<number | null>(null)
+  const [loading, setLoading] = useState(true)
   const [msg, setMsg] = useState<string | null>(null)
 
   const load = useCallback(async () => {
@@ -43,8 +46,10 @@ export default function OmbudCases({ session }: { session: Session }) {
       const g = await api<Gate>('ombud', '/v1/gate', { session })
       setGate(g)
       setError(null)
+      setLoading(false)
     } catch (e) {
       setError((e as Error).message)
+      setLoading(false)
     }
   }, [session])
 
@@ -72,12 +77,13 @@ export default function OmbudCases({ session }: { session: Session }) {
           appellant_pseudo_tin: form.appellant_pseudo_tin,
           authority: form.authority,
           tax_type: form.tax_type,
-          disputed_amount_kobo: Math.round(parseFloat(form.amount) * 100),
+          disputed_amount_kobo: amountKobo ?? 0,
           grounds: form.grounds,
         },
       })
       setMsg(`${c.id} received; ack deadline ${new Date(c.ack_deadline).toLocaleDateString()}`)
-      setForm({ ...form, appellant_pseudo_tin: '', amount: '', grounds: '' })
+      setForm({ ...form, appellant_pseudo_tin: '', grounds: '' })
+      setAmountKobo(null)
       await load()
     } catch (e) {
       setError((e as Error).message)
@@ -93,39 +99,38 @@ export default function OmbudCases({ session }: { session: Session }) {
       <div
         className={`mb-4 rounded-lg border px-4 py-2 text-sm ${
           gate?.active
-            ? 'border-moss-500/40 bg-moss-100 text-moss-700'
-            : 'border-clay-500/40 bg-clay-100 text-clay-700'
+            ? 'border-success-strong/40 bg-success text-success-on'
+            : 'border-warning-strong/40 bg-warning text-warning-on'
         }`}
       >
         Activation gate ombud.rules_active: {gate ? (gate.active ? 'ACTIVE' : 'OFF') : '…'} ({gate?.mode})
       </div>
       <ErrorBox error={error} />
       <Card className="mb-4">
-        <h2 className="mb-2 text-sm font-semibold text-sand-700">Intake (clerk)</h2>
+        <h2 className="mb-2 text-sm font-semibold text-stone-900">Intake (clerk)</h2>
         <div className="grid grid-cols-2 gap-2 md:grid-cols-5">
           <input
+            aria-label="Appellant pseudonymised TIN"
             className="input font-mono"
             placeholder="appellant ptin_…"
             value={form.appellant_pseudo_tin}
             onChange={(e) => setForm({ ...form, appellant_pseudo_tin: e.target.value })}
           />
-          <select className="input" value={form.authority} onChange={(e) => setForm({ ...form, authority: e.target.value })}>
+          <select aria-label="Authority" className="input" value={form.authority} onChange={(e) => setForm({ ...form, authority: e.target.value })}>
             {['NRS', 'NG-LA', 'NG-FC', 'NG-KN'].map((a) => (
               <option key={a}>{a}</option>
             ))}
           </select>
-          <select className="input" value={form.tax_type} onChange={(e) => setForm({ ...form, tax_type: e.target.value })}>
+          <select aria-label="Tax type" className="input" value={form.tax_type} onChange={(e) => setForm({ ...form, tax_type: e.target.value })}>
             {['CIT', 'VAT', 'PIT', 'WHT'].map((t) => (
               <option key={t}>{t}</option>
             ))}
           </select>
+          <div aria-label="Disputed amount">
+            <MoneyInput id="ombud-amount" valueKobo={amountKobo} onChangeKobo={setAmountKobo} />
+          </div>
           <input
-            className="input"
-            placeholder="disputed ₦"
-            value={form.amount}
-            onChange={(e) => setForm({ ...form, amount: e.target.value })}
-          />
-          <input
+            aria-label="Grounds"
             className="input"
             placeholder="grounds"
             value={form.grounds}
@@ -135,33 +140,35 @@ export default function OmbudCases({ session }: { session: Session }) {
         <div className="mt-2 flex items-center gap-3">
           <button
             className="btn btn-primary"
-            disabled={!form.appellant_pseudo_tin.startsWith('ptin_') || !form.amount || !form.grounds}
+            disabled={!form.appellant_pseudo_tin.startsWith('ptin_') || amountKobo == null || !form.grounds}
             onClick={intake}
           >
             Intake case
           </button>
-          {msg && <span className="text-sm text-moss-600">{msg}</span>}
+          {msg && <span aria-live="polite" className="text-sm text-success-strong">{msg}</span>}
         </div>
       </Card>
       <Card>
-        {cases.length === 0 ? (
-          <Empty>No cases yet.</Empty>
+        {loading ? (
+          <div aria-busy="true" aria-label="Loading cases"><SkeletonRows rows={5} /></div>
+        ) : cases.length === 0 ? (
+          <Empty title="No cases yet">Intake a case above to open the registry.</Empty>
         ) : (
           <table className="w-full">
             <thead>
-              <tr className="border-b border-sand-200">
-                <th className="th">Case</th>
-                <th className="th">Tax</th>
-                <th className="th">Disputed</th>
-                <th className="th">State</th>
-                <th className="th">Decide by</th>
-                <th className="th">Deposit</th>
-                <th className="th">Actions</th>
+              <tr className="border-b border-neutral-200">
+                <th scope="col" className="th">Case</th>
+                <th scope="col" className="th">Tax</th>
+                <th scope="col" className="th">Disputed</th>
+                <th scope="col" className="th">State</th>
+                <th scope="col" className="th">Decide by</th>
+                <th scope="col" className="th">Deposit</th>
+                <th scope="col" className="th">Actions</th>
               </tr>
             </thead>
             <tbody>
               {cases.map((c) => (
-                <tr key={c.id} className="border-b border-sand-100 hover:bg-sand-50">
+                <tr key={c.id} className="border-b border-neutral-100 hover:bg-neutral-50">
                   <td className="td font-mono text-xs">{c.id}</td>
                   <td className="td">{c.tax_type}</td>
                   <td className="td">{fmtKobo(c.disputed_amount_kobo)}</td>
@@ -170,7 +177,7 @@ export default function OmbudCases({ session }: { session: Session }) {
                       {c.state}
                     </Badge>
                   </td>
-                  <td className="td text-xs text-sand-500">{new Date(c.decide_deadline).toLocaleDateString()}</td>
+                  <td className="td text-xs text-stone-600">{new Date(c.decide_deadline).toLocaleDateString()}</td>
                   <td className="td text-xs">
                     {c.deposit ? (
                       <span>
