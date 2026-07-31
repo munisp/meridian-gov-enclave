@@ -94,6 +94,28 @@ customs products    adapters, NTAA       deposits (500),  tin-graph, ledger,
 - **Activation gate** on Ombud rules: reg-watch API (`REG_WATCH_URL`) or local
   gate file fallback; decisions/deposits refused (503) while gate is off.
 
+### services/tcc (Python FastAPI) — Tax Clearance Certificates (NTAA 2025 s.72)
+
+- Application → eligibility evaluation (**no outstanding liabilities** via the
+  rev360/ledger adapter — `TCC_LEDGER_URL`, fail-closed in prod, dev sim ledger
+  tagged `ledger_mode: "sim"`) + **3-year disclosure coverage** → issue or
+  **deny with reasons**.
+- **2-week statutory SLA** (`/v1/tcc/sla/breaches` alert payload; late
+  decisions flagged `sla_breached`).
+- Certificates ed25519-signed with QR-verifiable payload (`NRSTCC1|...`);
+  `GET /v1/tcc/verify/{id}` is public (MDAs/banks). Prod requires
+  `TCC_SIGNING_KEY_PEM` (fail-closed); dev uses an ephemeral key (tagged).
+
+### services/receipts (Python FastAPI) — official payment e-receipts
+
+- Content model: TIN, payer name, amount (integer kobo), tax type, period,
+  **RRR-style unique reference**, payment channel; ed25519-signed with
+  QR-verifiable payload (`NRSRCT1|...`).
+- **WORM storage**: append-only JSONL with SHA-256 hash chain + tamper
+  detection (`RECEIPTS_WORM_ROOT`).
+- `GET /v1/receipts/verify/{id}` public (signature + WORM chain); issuance
+  events `nrs.receipts.issued.v1` via `EVENT_BUS_URL` or tagged local outbox.
+
 ### services/enclave-gateway (Go) — THE audited gateway
 
 - Endpoints: `POST /flows/f1/ubl-preclearance-invoices`, `/f2/b2c-reports`,
