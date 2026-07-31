@@ -41,6 +41,10 @@ type Server struct {
 
 func main() {
 	cfg := loadConfig()
+	cfg.applyDevDefaults()
+	if err := cfg.Validate(); err != nil {
+		log.Fatalf("config invalid (fail closed): %v", err)
+	}
 	worm, local, err := newWORMStore(cfg)
 	if err != nil {
 		log.Fatalf("worm store: %v", err)
@@ -64,6 +68,12 @@ func main() {
 	mux.HandleFunc("GET /flows/f8/wht-credit-recon", s.withAuth(s.handleF8))
 	// Receipt log for the admin console.
 	mux.HandleFunc("GET /v1/receipts", s.withAuth(s.handleReceipts))
+	// I19: sovereign audit-ledger cross-anchoring
+	mux.HandleFunc("POST /v1/audit/anchors", s.withAuth(s.handleCreateAnchor))
+	mux.HandleFunc("GET /v1/audit/anchors/verify", s.withAuth(s.handleVerifyAnchor))
+	// I20: NDPA consent-receipt data-sharing gateway
+	mux.HandleFunc("POST /v1/share/disclose", s.withAuth(s.handleDisclose))
+	mux.HandleFunc("GET /v1/share/disclosures", s.withAuth(s.handleDisclosureLog))
 
 	// NOTE: F9 and F10 have NO routes. Deny middleware below rejects their
 	// paths explicitly; there is no code path that can dispatch them.

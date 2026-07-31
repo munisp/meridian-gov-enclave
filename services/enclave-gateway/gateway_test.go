@@ -14,6 +14,7 @@ func newTestServer(t *testing.T) (*Server, http.Handler) {
 	cfg := loadConfig()
 	cfg.DataRoot = t.TempDir()
 	cfg.AuthMode = "dev"
+	cfg.applyDevDefaults()
 	worm, local, err := newWORMStore(cfg)
 	if err != nil {
 		t.Fatal(err)
