@@ -112,11 +112,15 @@ func (s *Server) withAuth(next http.HandlerFunc) http.HandlerFunc {
 	}
 }
 
-// roleOf maps dev principal roles onto ombud institutional roles. In dev,
-// X-Ombud-Role selects the institutional role explicitly.
-func roleOf(r *http.Request, p *Principal) string {
-	if v := r.Header.Get("X-Ombud-Role"); v == RoleRegistry || v == RoleClerk || v == RoleMember {
-		return v
+// roleOf maps principal roles onto ombud institutional roles. The
+// X-Ombud-Role header selects the institutional role explicitly in DEV mode
+// only (audit fix H-2): in keycloak mode the header is ignored and the role
+// derives solely from the verified token claims.
+func (s *Server) roleOf(r *http.Request, p *Principal) string {
+	if s.authn.DevMode() {
+		if v := r.Header.Get("X-Ombud-Role"); v == RoleRegistry || v == RoleClerk || v == RoleMember {
+			return v
+		}
 	}
 	if p.HasRole("admin") {
 		return RoleRegistry
@@ -145,7 +149,7 @@ func (s *Server) requireGate(w http.ResponseWriter) bool {
 // ------------------------------------------------------------------ cases
 func (s *Server) intakeCase(w http.ResponseWriter, r *http.Request) {
 	p := r.Context().Value(ctxPrincipal).(*Principal)
-	role := roleOf(r, p)
+	role := s.roleOf(r, p)
 	if role == RoleMember {
 		writeProblem(w, http.StatusForbidden, "Forbidden", "members do not intake cases (clerk/registry)")
 		return
@@ -172,7 +176,7 @@ func (s *Server) intakeCase(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) listCases(w http.ResponseWriter, r *http.Request) {
 	p := r.Context().Value(ctxPrincipal).(*Principal)
-	role := roleOf(r, p)
+	role := s.roleOf(r, p)
 	priv := role == RoleRegistry || role == RoleMember
 	writeJSON(w, http.StatusOK, map[string]any{"cases": s.cases.Search("", priv)})
 }
@@ -188,7 +192,7 @@ func (s *Server) getCase(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) transitionCase(w http.ResponseWriter, r *http.Request) {
 	p := r.Context().Value(ctxPrincipal).(*Principal)
-	role := roleOf(r, p)
+	role := s.roleOf(r, p)
 	var body struct {
 		Action  string `json:"action"`
 		Detail  string `json:"detail"`
@@ -325,7 +329,7 @@ func (s *Server) buildEvidencePack(w http.ResponseWriter, r *http.Request) {
 // ------------------------------------------------------------------ search (privilege-filtered)
 func (s *Server) search(w http.ResponseWriter, r *http.Request) {
 	p := r.Context().Value(ctxPrincipal).(*Principal)
-	role := roleOf(r, p)
+	role := s.roleOf(r, p)
 	priv := role == RoleRegistry || role == RoleMember
 	q := r.URL.Query().Get("q")
 	writeJSON(w, http.StatusOK, map[string]any{"q": q, "role": role,
@@ -342,7 +346,7 @@ func (s *Server) getGate(w http.ResponseWriter, _ *http.Request) {
 
 func (s *Server) flipGate(w http.ResponseWriter, r *http.Request) {
 	p := r.Context().Value(ctxPrincipal).(*Principal)
-	if roleOf(r, p) != RoleRegistry {
+	if s.roleOf(r, p) != RoleRegistry {
 		writeProblem(w, http.StatusForbidden, "Forbidden", "registry role required to flip gates")
 		return
 	}

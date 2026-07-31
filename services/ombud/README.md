@@ -31,3 +31,11 @@ KAFKA_BROKERS=redpanda:9092 go run .
 
 Pseudonymisation contract preserved: only `ptin_...` appellant ids are stored
 or emitted; raw TINs are rejected at intake.
+
+## Auth note (H-2)
+
+Institutional roles derive from verified token claims (`admin`→registry,
+`operator`→clerk, otherwise member). The `X-Ombud-Role` header is honored
+**only in `AUTH_MODE=dev`**; in keycloak mode it is ignored. As in the other
+gov services, keycloak mode rejects Bearer tokens (and never honors dev
+headers) when OIDC is misconfigured — fail closed.

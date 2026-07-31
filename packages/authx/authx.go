@@ -93,6 +93,11 @@ func New(cfg Config, component string) *Authenticator {
 	return a
 }
 
+// DevMode reports whether the authenticator runs the dev profile
+// (AUTH_MODE != keycloak). Dev-only affordances (e.g. role-override
+// headers) must be gated on this.
+func (a *Authenticator) DevMode() bool { return a.cfg.Mode != "keycloak" }
+
 // PrincipalFrom authenticates the request; nil when unauthenticated.
 func (a *Authenticator) PrincipalFrom(r *http.Request) *Principal {
 	authz := r.Header.Get("Authorization")
