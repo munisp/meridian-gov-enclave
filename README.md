@@ -201,3 +201,8 @@ logs `profile=dev|prod component=<name>`.
 `.github/workflows/ci.yml` (copy at `ci/workflows/ci.yml`, see `ci/README.md`):
 Go build/vet/`go test -race` per module, pytest for analytics, `npm ci` +
 `tsc` + build for gov-console.
+
+## Hardening + innovations (branch feature/inclusion-hardening)
+- FIX: prod fail-closed — Config.Validate refuses non-dev AUTH_MODE without TLS cert pair and an explicit INTERNAL_FLOW_TOKEN; dev defaults applied only in dev.
+- I19 (REAL): sovereign audit-ledger cross-anchoring — POST /v1/audit/anchors folds the WORM manifest chain into a Merkle root and appends an HMAC-sealed, hash-chained anchor record (ANCHOR_HMAC_KEY; ANCHOR_LEDGER_URL optional external endpoint); GET /v1/audit/anchors/verify re-verifies seals, chain linkage and chain-tip coverage. Tamper test included.
+- I20 (REAL): NDPA consent-receipt data-sharing gateway — POST /v1/share/disclose requires a valid consent receipt (local store; SIMULATED — prod wires CONSENT_STORE_URL) or statutory basis, enforces per-agency minimisation allowlists and k=5 anonymity, and writes a full disclosure log (GET /v1/share/disclosures).
