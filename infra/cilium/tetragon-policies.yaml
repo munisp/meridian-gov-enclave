@@ -1,0 +1,61 @@
+# Tetragon TracingPolicies for the enclave (SPEC C section 5) — authoritative
+# copy owned by gov-enclave. Deploy monitor mode 2 weeks, then Sigkill for
+# WORM writes only (see core infra/cilium/ROLLOUT.md phase 5).
+# Events -> tetragon export -> audit.events.v1, tagged source: tetragon.
+apiVersion: cilium.io/v1alpha1
+kind: TracingPolicy
+metadata:
+  name: enclave-worm-guard
+spec:
+  kprobes:
+    - call: security_file_permission
+      syscall: false
+      args:
+        - index: 0
+          type: file
+      selectors:
+        - matchNamespaces:
+            - namespace: enclave
+              operator: In
+          matchArgs:
+            - index: 0
+              operator: Prefix
+              values:
+                - /var/lib/enclave/worm/
+          matchActions:
+            - action: Post   # log every open
+    - call: security_file_permission
+      args:
+        - index: 0
+          type: file
+      selectors:
+        - matchArgs:
+            - index: 0
+              operator: Prefix
+              values:
+                - /var/lib/enclave/worm/
+          matchActions:
+            - action: Sigkill   # kill writer to WORM
+            - action: Post
+---
+apiVersion: cilium.io/v1alpha1
+kind: TracingPolicy
+metadata:
+  name: enclave-exec-trace
+spec:
+  kprobes:
+    - call: security_bprm_check
+      args:
+        - index: 0
+          type: linux_binprm
+      selectors:
+        - matchNamespaces:
+            - namespace: enclave
+              operator: In
+          matchBinaries:
+            - operator: NotIn
+              values:
+                - /usr/local/bin/enclave-gateway
+                - /usr/bin/ollama
+          matchActions:
+            - action: Post   # unexpected exec -> audit alert (Sigkill in enforce mode, phase 2)
