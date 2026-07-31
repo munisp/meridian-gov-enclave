@@ -1,0 +1,15 @@
+{
+  "app.name": "Meridian — Gov Console",
+  "app.zone": "Meridian · Mpaghara Isi Ala",
+  "app.tagline": "Mpaghara isi ala · ọnụ ụzọ echekwara · nyocha ezonchiri",
+  "auth.signin": "Banye",
+  "auth.signin.keycloak": "Banye site na Keycloak",
+  "auth.signin.dev": "Banye (dev JWT)",
+  "auth.signingIn": "Na-abanye…",
+  "auth.signout": "Pụọ",
+  "lang.label": "Asụsụ",
+  "lang.en": "Bekee",
+  "lang.ha": "Hausa",
+  "lang.yo": "Yorùbá",
+  "lang.ig": "Igbo"
+}

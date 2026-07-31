@@ -1,7 +1,12 @@
 import { useEffect, useState } from 'react'
 import { Navigate, NavLink, Route, Routes, useNavigate } from 'react-router-dom'
+import { useTranslation } from 'react-i18next'
+import { Landmark } from 'lucide-react'
 import { loadSession, login, saveSession, Session, Role } from './api'
 import { AUTH_MODE, beginOidcLogin, completeOidcLogin, oidcLogout, onOidcToken } from './oidc'
+import Field from './components/Field'
+import LangSwitcher from './components/LangSwitcher'
+import { Chip } from './components/ui'
 import NrsDashboard from './pages/NrsDashboard'
 import CaseFeed from './pages/CaseFeed'
 import NswDeclarations from './pages/NswDeclarations'
@@ -26,76 +31,96 @@ const NAV = [
   { to: '/ombud/cases', label: 'Cases & deposits' },
 ]
 
-function LoginPage({ onLogin }: { onLogin: (s: Session) => void }) {
-  if (AUTH_MODE === 'keycloak') {
-    return (
-      <div className="flex min-h-screen items-center justify-center bg-sand-100">
-        <div className="card w-full max-w-sm p-8">
-          <div className="mb-1 text-xs font-semibold uppercase tracking-widest text-clay-600">
-            Meridian · Sovereign Zone
-          </div>
-          <h1 className="mb-6 text-2xl font-bold text-sand-900">Gov Console</h1>
-          <button className="btn btn-primary w-full justify-center" onClick={() => void beginOidcLogin()}>
-            Sign in with Keycloak
-          </button>
-          <p className="mt-4 text-xs text-sand-500">
-            Production profile: Keycloak OIDC (authorization code + PKCE). Tokens in memory only.
-          </p>
-        </div>
-      </div>
-    )
-  }
-  const [role, setRole] = useState<Role>('admin')
-  const [authority, setAuthority] = useState('JRB-SEC')
-  const [busy, setBusy] = useState(false)
-  const nav = useNavigate()
+function LoginCard({ children }: { children: React.ReactNode }) {
+  const { t } = useTranslation('common')
   return (
-    <div className="flex min-h-screen items-center justify-center bg-sand-100">
+    <div className="flex min-h-screen items-center justify-center bg-neutral-100">
       <div className="card w-full max-w-sm p-8">
-        <div className="mb-1 text-xs font-semibold uppercase tracking-widest text-clay-600">
-          Meridian · Sovereign Zone
+        <div className="mb-1 flex items-center gap-2 text-xs font-semibold uppercase tracking-widest text-brand-700">
+          <Landmark aria-hidden="true" className="h-4 w-4" />
+          {t('app.zone')}
         </div>
-        <h1 className="mb-6 text-2xl font-bold text-sand-900">Gov Console</h1>
-        <label className="mb-1 block text-sm font-medium text-sand-700">Dev role</label>
-        <select className="input mb-4" value={role} onChange={(e) => setRole(e.target.value as Role)}>
-          <option value="admin">admin (registry)</option>
-          <option value="operator">operator (clerk)</option>
-          <option value="auditor">auditor (member)</option>
-        </select>
-        <label className="mb-1 block text-sm font-medium text-sand-700">Authority (JRB identity)</label>
-        <select className="input mb-6" value={authority} onChange={(e) => setAuthority(e.target.value)}>
-          <option value="JRB-SEC">JRB Secretariat</option>
-          <option value="NRS">NRS</option>
-          <option value="NG-LA">Lagos LIRS</option>
-          <option value="NG-FC">FCT-IRS</option>
-          <option value="NG-KN">Kano IRS</option>
-          <option value="NG-RI">Rivers IRS</option>
-        </select>
-        <button
-          className="btn btn-primary w-full justify-center"
-          disabled={busy}
-          onClick={async () => {
-            setBusy(true)
-            try {
-              const s = await login(role, authority)
-              onLogin(s)
-              nav('/nrs/scoring')
-            } finally {
-              setBusy(false)
-            }
-          }}
-        >
-          {busy ? 'Signing in…' : 'Sign in (dev JWT)'}
-        </button>
-        <p className="mt-4 text-xs text-sand-500">
-          Dev mode: HS256 JWT minted locally (MERIDIAN_DEV_JWT_SECRET). Production uses Keycloak OIDC.
-        </p>
+        <h1 className="mb-6 text-2xl font-bold text-stone-900">{t('app.name')}</h1>
+        {children}
+        <div className="mt-6">
+          <LangSwitcher />
+        </div>
       </div>
     </div>
   )
 }
 
+function LoginPage({ onLogin }: { onLogin: (s: Session) => void }) {
+  const { t } = useTranslation('common')
+  if (AUTH_MODE === 'keycloak') {
+    return (
+      <LoginCard>
+        <button className="btn btn-primary w-full justify-center" onClick={() => void beginOidcLogin()}>
+          {t('auth.signin.keycloak')}
+        </button>
+        <p className="mt-4 text-xs text-stone-600">
+          Production profile: Keycloak OIDC (authorization code + PKCE). Tokens in memory only.
+        </p>
+      </LoginCard>
+    )
+  }
+  return <DevLogin onLogin={onLogin} />
+}
+
+function DevLogin({ onLogin }: { onLogin: (s: Session) => void }) {
+  const { t } = useTranslation('common')
+  const [role, setRole] = useState<Role>('admin')
+  const [authority, setAuthority] = useState('JRB-SEC')
+  const [busy, setBusy] = useState(false)
+  const nav = useNavigate()
+  return (
+    <LoginCard>
+      <div className="mb-4">
+        <Field label="Dev role" id="dev-role">
+          <select id="dev-role" className="input" value={role} onChange={(e) => setRole(e.target.value as Role)}>
+            <option value="admin">admin (registry)</option>
+            <option value="operator">operator (clerk)</option>
+            <option value="auditor">auditor (member)</option>
+          </select>
+        </Field>
+      </div>
+      <div className="mb-6">
+        <Field label="Authority (JRB identity)" id="dev-authority">
+          <select id="dev-authority" className="input" value={authority} onChange={(e) => setAuthority(e.target.value)}>
+            <option value="JRB-SEC">JRB Secretariat</option>
+            <option value="NRS">NRS</option>
+            <option value="NG-LA">Lagos LIRS</option>
+            <option value="NG-FC">FCT-IRS</option>
+            <option value="NG-KN">Kano IRS</option>
+            <option value="NG-RI">Rivers IRS</option>
+          </select>
+        </Field>
+      </div>
+      <button
+        className="btn btn-primary w-full justify-center"
+        disabled={busy}
+        onClick={async () => {
+          setBusy(true)
+          try {
+            const s = await login(role, authority)
+            onLogin(s)
+            nav('/nrs/scoring')
+          } finally {
+            setBusy(false)
+          }
+        }}
+      >
+        {busy ? t('auth.signingIn') : t('auth.signin.dev')}
+      </button>
+      <p className="mt-4 text-xs text-stone-600">
+        Dev mode: HS256 JWT minted locally (MERIDIAN_DEV_JWT_SECRET). Production uses Keycloak OIDC.
+      </p>
+    </LoginCard>
+  )
+}
+
 export default function App() {
+  const { t } = useTranslation('common')
   const [session, setSession] = useState<Session | null>(loadSession())
   const [oidcBusy, setOidcBusy] = useState(AUTH_MODE === 'keycloak')
 
@@ -116,7 +141,11 @@ export default function App() {
   }, [])
 
   if (AUTH_MODE === 'keycloak' && oidcBusy && !session) {
-    return <div className="flex min-h-screen items-center justify-center bg-sand-100 text-sand-500">Signing in…</div>
+    return (
+      <div className="flex min-h-screen items-center justify-center bg-neutral-100 text-stone-600" role="status">
+        {t('auth.signingIn')}
+      </div>
+    )
   }
   if (!session) {
     return (
@@ -127,13 +156,22 @@ export default function App() {
   }
   return (
     <div className="flex min-h-screen">
-      <aside className="w-60 shrink-0 border-r border-sand-200 bg-sand-100 p-4">
-        <div className="mb-1 text-xs font-semibold uppercase tracking-widest text-clay-600">Meridian</div>
-        <div className="mb-6 text-lg font-bold text-sand-900">Gov Console</div>
-        <nav className="space-y-1">
+      <a
+        href="#main"
+        className="sr-only focus:not-sr-only focus:absolute focus:z-50 focus:m-2 focus:rounded-md focus:bg-brand-700 focus:px-3 focus:py-2 focus:text-white"
+      >
+        Skip to content
+      </a>
+      <aside className="flex w-60 shrink-0 flex-col bg-brand-800 p-4">
+        <div className="mb-1 flex items-center gap-2 text-xs font-semibold uppercase tracking-widest text-brand-200">
+          <Landmark aria-hidden="true" className="h-4 w-4" />
+          Meridian
+        </div>
+        <div className="mb-6 text-lg font-bold text-white">Gov Console</div>
+        <nav className="flex-1 space-y-1" aria-label="Primary">
           {NAV.map((item, i) =>
             'section' in item && item.section ? (
-              <div key={i} className="mt-4 px-3 text-xs font-semibold uppercase tracking-wide text-sand-400">
+              <div key={i} className="mt-4 px-3 text-xs font-semibold uppercase tracking-wide text-brand-300">
                 {item.section}
               </div>
             ) : (
@@ -147,15 +185,16 @@ export default function App() {
             ),
           )}
         </nav>
+        <div className="mt-4 border-t border-brand-700 pt-3">
+          <LangSwitcher dark />
+        </div>
       </aside>
-      <main className="flex-1 overflow-y-auto">
-        <header className="flex items-center justify-between border-b border-sand-200 bg-white px-6 py-3">
-          <div className="text-sm text-sand-500">
-            Sovereign enclave · audited cross-zone gateway · pseudonymised analytics
-          </div>
+      <main id="main" className="flex-1 overflow-y-auto">
+        <header className="flex items-center justify-between border-b border-neutral-200 bg-white px-6 py-3 shadow-sm">
+          <div className="text-sm text-stone-600">{t('app.tagline')}</div>
           <div className="flex items-center gap-3 text-sm">
-            <span className="badge bg-moss-100 text-moss-700">{session.role}</span>
-            <span className="badge bg-sand-200 text-sand-700">{session.authorityId}</span>
+            <Chip status="info">{session.role}</Chip>
+            <Chip status="demo">{session.authorityId}</Chip>
             <button
               className="btn"
               onClick={() => {
@@ -164,7 +203,7 @@ export default function App() {
                 setSession(null)
               }}
             >
-              Sign out
+              {t('auth.signout')}
             </button>
           </div>
         </header>

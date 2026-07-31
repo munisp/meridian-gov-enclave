@@ -1,0 +1,15 @@
+{
+  "app.name": "Meridian — Gov Console",
+  "app.zone": "Meridian · Yankin Sarauta",
+  "app.tagline": "Yankin sarauta · ƙofa mai tsare bayanai · nazarin data ɓoye",
+  "auth.signin": "Shiga",
+  "auth.signin.keycloak": "Shiga da Keycloak",
+  "auth.signin.dev": "Shiga (dev JWT)",
+  "auth.signingIn": "Ana shiga…",
+  "auth.signout": "Fita",
+  "lang.label": "Harshe",
+  "lang.en": "Turanci",
+  "lang.ha": "Hausa",
+  "lang.yo": "Yorùbá",
+  "lang.ig": "Igbo"
+}

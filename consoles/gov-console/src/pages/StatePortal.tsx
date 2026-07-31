@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useState } from 'react'
 import { api, fmtKobo, Session } from '../api'
-import { Badge, Card, Empty, ErrorBox, PageTitle } from '../components/ui'
+import { Badge, Card, Empty, ErrorBox, PageTitle, SkeletonRows } from '../components/ui'
 
 interface Filing {
   filing_id: string
@@ -31,6 +31,7 @@ export default function StatePortal({ session }: { session: Session }) {
   const [filings, setFilings] = useState<Filing[]>([])
   const [attribution, setAttribution] = useState<FeedState | null>(null)
   const [error, setError] = useState<string | null>(null)
+  const [loading, setLoading] = useState(true)
 
   const load = useCallback(async () => {
     setError(null)
@@ -41,8 +42,10 @@ export default function StatePortal({ session }: { session: Session }) {
         { method: 'POST', session, body: {} },
       )
       setFilings(f.filings || [])
+      setLoading(false)
     } catch (e) {
       setError((e as Error).message)
+      setLoading(false)
     }
     try {
       const doc = await api<{ feed: { states: FeedState[] } }>(
@@ -68,7 +71,7 @@ export default function StatePortal({ session }: { session: Session }) {
       />
       <ErrorBox error={error} />
       <div className="mb-4 flex items-center gap-2">
-        <select className="input w-72" value={state} onChange={(e) => setState(e.target.value)}>
+        <select aria-label="State adapter" className="input w-72" value={state} onChange={(e) => setState(e.target.value)}>
           {STATES.map((s) => (
             <option key={s.code} value={s.code}>
               {s.name}
@@ -79,22 +82,24 @@ export default function StatePortal({ session }: { session: Session }) {
       </div>
       <div className="grid grid-cols-1 gap-4 xl:grid-cols-2">
         <Card>
-          <h2 className="mb-3 text-sm font-semibold text-sand-700">Filings feed · {state}</h2>
-          {filings.length === 0 ? (
-            <Empty>No filings from this adapter.</Empty>
+          <h2 className="mb-3 text-sm font-semibold text-stone-900">Filings feed · {state}</h2>
+          {loading ? (
+            <div aria-busy="true" aria-label="Loading filings"><SkeletonRows /></div>
+          ) : filings.length === 0 ? (
+            <Empty title="No filings">This adapter has returned no filings.</Empty>
           ) : (
             <table className="w-full">
               <thead>
-                <tr className="border-b border-sand-200">
-                  <th className="th">Filing</th>
-                  <th className="th">Tax</th>
-                  <th className="th">Place of supply</th>
-                  <th className="th">Amount</th>
+                <tr className="border-b border-neutral-200">
+                  <th scope="col" className="th">Filing</th>
+                  <th scope="col" className="th">Tax</th>
+                  <th scope="col" className="th">Place of supply</th>
+                  <th scope="col" className="th">Amount</th>
                 </tr>
               </thead>
               <tbody>
                 {filings.map((f) => (
-                  <tr key={f.filing_id} className="border-b border-sand-100">
+                  <tr key={f.filing_id} className="border-b border-neutral-100">
                     <td className="td font-mono text-xs">{f.filing_id}</td>
                     <td className="td">{f.tax_type}</td>
                     <td className="td text-xs">{f.place_of_supply}</td>
@@ -106,26 +111,26 @@ export default function StatePortal({ session }: { session: Session }) {
           )}
         </Card>
         <Card>
-          <h2 className="mb-3 text-sm font-semibold text-sand-700">Attribution · {state}</h2>
+          <h2 className="mb-3 text-sm font-semibold text-stone-900">Attribution · {state}</h2>
           {!attribution ? (
-            <Empty>No published feed — publish from the JRB attribution console.</Empty>
+            <Empty title="No published feed">Publish from the JRB attribution console.</Empty>
           ) : (
             <dl className="space-y-2 text-sm">
-              <div className="flex justify-between border-b border-sand-100 pb-2">
-                <dt className="text-sand-500">Place-of-consumption (30%)</dt>
+              <div className="flex justify-between border-b border-neutral-100 pb-2">
+                <dt className="text-stone-600">Place-of-consumption (30%)</dt>
                 <dd className="font-semibold">{fmtKobo(attribution.consumption_portion_kobo)}</dd>
               </div>
-              <div className="flex justify-between border-b border-sand-100 pb-2">
-                <dt className="text-sand-500">Equality</dt>
+              <div className="flex justify-between border-b border-neutral-100 pb-2">
+                <dt className="text-stone-600">Equality</dt>
                 <dd className="font-semibold">{fmtKobo(attribution.equality_portion_kobo)}</dd>
               </div>
-              <div className="flex justify-between border-b border-sand-100 pb-2">
-                <dt className="text-sand-500">Derivation</dt>
+              <div className="flex justify-between border-b border-neutral-100 pb-2">
+                <dt className="text-stone-600">Derivation</dt>
                 <dd className="font-semibold">{fmtKobo(attribution.derivation_portion_kobo)}</dd>
               </div>
               <div className="flex justify-between pt-1">
                 <dt className="font-semibold">Total</dt>
-                <dd className="text-lg font-bold text-clay-600">{fmtKobo(attribution.total_kobo)}</dd>
+                <dd className="text-lg font-bold text-brand-700">{fmtKobo(attribution.total_kobo)}</dd>
               </div>
             </dl>
           )}

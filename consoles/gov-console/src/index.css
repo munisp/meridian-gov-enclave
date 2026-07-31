@@ -6,36 +6,49 @@
   color-scheme: light;
 }
 
+/* Meridian One §6 — reduced-motion users get instant state changes. */
+@media (prefers-reduced-motion: reduce) {
+  .animate-pulse {
+    animation: none;
+  }
+}
+
 body {
-  @apply bg-sand-50 text-sand-900 antialiased;
+  @apply bg-neutral-50 text-stone-900 antialiased;
 }
 
 @layer components {
   .card {
-    @apply rounded-xl border border-sand-200 bg-white shadow-sm;
+    @apply rounded-lg border border-neutral-200 bg-white shadow-sm;
   }
   .btn {
-    @apply inline-flex items-center gap-1 rounded-lg border border-sand-300 bg-white px-3 py-1.5 text-sm font-medium text-sand-800 hover:bg-sand-100 disabled:opacity-50;
+    @apply inline-flex min-h-9 items-center gap-1 rounded-md border border-neutral-300 bg-white px-3 py-1.5 text-sm font-medium text-stone-900 hover:bg-neutral-100 disabled:opacity-50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand-700 focus-visible:ring-offset-2;
   }
   .btn-primary {
-    @apply border-clay-600 bg-clay-600 text-white hover:bg-clay-700;
+    @apply border-brand-700 bg-brand-700 text-white hover:bg-brand-800;
   }
   .input {
-    @apply w-full rounded-lg border border-sand-300 bg-white px-3 py-2 text-sm outline-none focus:border-clay-500;
+    @apply w-full rounded-md border border-neutral-300 bg-white px-3 py-2 text-sm text-stone-900 outline-none focus:border-brand-600 focus:ring-2 focus:ring-brand-400 aria-[invalid=true]:border-danger-strong;
   }
-  .badge {
-    @apply inline-flex items-center rounded-full px-2 py-0.5 text-xs font-semibold;
+  .label {
+    @apply mb-1 block text-sm font-medium text-stone-900;
+  }
+  .chip {
+    @apply inline-flex items-center gap-1 rounded-full px-2.5 py-0.5 text-xs font-medium;
   }
   .th {
-    @apply px-3 py-2 text-left text-xs font-semibold uppercase tracking-wide text-sand-500;
+    @apply px-3 py-2 text-left text-xs font-semibold uppercase tracking-wide text-stone-600;
   }
   .td {
-    @apply px-3 py-2 text-sm text-sand-800;
+    @apply px-3 py-2 text-sm text-stone-900 tabular-nums;
   }
   .navlink {
-    @apply flex items-center gap-2 rounded-lg px-3 py-2 text-sm font-medium text-sand-600 hover:bg-sand-100 hover:text-sand-900;
+    @apply flex items-center gap-2 rounded-md px-3 py-2 text-sm font-medium text-brand-100 hover:bg-brand-700 hover:text-white focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand-400;
   }
   .navlink-active {
-    @apply bg-sand-200 text-sand-900;
+    @apply bg-brand-900 font-semibold text-white;
+  }
+  .skeleton {
+    @apply animate-pulse rounded-md bg-neutral-100;
   }
 }

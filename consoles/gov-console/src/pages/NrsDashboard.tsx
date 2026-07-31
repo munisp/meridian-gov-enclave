@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useState } from 'react'
 import { api, Session, short } from '../api'
-import { Badge, bandTone, Card, Empty, ErrorBox, PageTitle } from '../components/ui'
+import { Badge, bandTone, Card, Empty, ErrorBox, PageTitle, SkeletonRows } from '../components/ui'
 
 interface ScoreRow {
   score_id: string
@@ -29,6 +29,7 @@ interface Explanation {
 
 export default function NrsDashboard({ session }: { session: Session }) {
   const [scores, setScores] = useState<ScoreRow[]>([])
+  const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
   const [selected, setSelected] = useState<string | null>(null)
   const [expl, setExpl] = useState<Explanation | null>(null)
@@ -39,8 +40,10 @@ export default function NrsDashboard({ session }: { session: Session }) {
       const data = await api<{ scores: ScoreRow[] }>('analytics', '/v1/scores', { session })
       setScores(data.scores || [])
       setError(null)
+      setLoading(false)
     } catch (e) {
       setError((e as Error).message)
+      setLoading(false)
     }
   }, [session])
 
@@ -94,7 +97,7 @@ export default function NrsDashboard({ session }: { session: Session }) {
         <button className="btn btn-primary" onClick={runDaily}>
           Run wf-daily-scoring
         </button>
-        {msg && <span className="text-sm text-moss-600">{msg}</span>}
+        {msg && <span aria-live="polite" className="text-sm text-success-strong">{msg}</span>}
         <div className="ml-auto flex gap-2">
           {(['high', 'medium', 'low'] as const).map((b) => (
             <Badge key={b} tone={bandTone(b)}>
@@ -105,29 +108,31 @@ export default function NrsDashboard({ session }: { session: Session }) {
       </div>
       <div className="grid grid-cols-1 gap-4 xl:grid-cols-2">
         <Card>
-          <h2 className="mb-3 text-sm font-semibold text-sand-700">Latest scores</h2>
-          {scores.length === 0 ? (
-            <Empty>No scores yet — ingest data and run wf-daily-scoring.</Empty>
+          <h2 className="mb-3 text-sm font-semibold text-stone-900">Latest scores</h2>
+          {loading ? (
+            <div aria-busy="true" aria-label="Loading scores"><SkeletonRows /></div>
+          ) : scores.length === 0 ? (
+            <Empty title="No scores yet">Ingest data and run wf-daily-scoring.</Empty>
           ) : (
             <table className="w-full">
               <thead>
-                <tr className="border-b border-sand-200">
-                  <th className="th">Subject</th>
-                  <th className="th">Score</th>
-                  <th className="th">Band</th>
-                  <th className="th">Model</th>
-                  <th className="th"></th>
+                <tr className="border-b border-neutral-200">
+                  <th scope="col" className="th">Subject</th>
+                  <th scope="col" className="th">Score</th>
+                  <th scope="col" className="th">Band</th>
+                  <th scope="col" className="th">Model</th>
+                  <th scope="col" className="th"></th>
                 </tr>
               </thead>
               <tbody>
                 {scores.map((s) => (
-                  <tr key={s.score_id} className="border-b border-sand-100 hover:bg-sand-50">
+                  <tr key={s.score_id} className="border-b border-neutral-100 hover:bg-neutral-50">
                     <td className="td font-mono text-xs">{short(s.pseudo_tin, 18)}</td>
                     <td className="td font-semibold">{s.score}</td>
                     <td className="td">
                       <Badge tone={bandTone(s.band)}>{s.band}</Badge>
                     </td>
-                    <td className="td text-xs text-sand-500">
+                    <td className="td text-xs text-stone-600">
                       {s.model_id}@{s.model_version}
                     </td>
                     <td className="td">
@@ -142,11 +147,11 @@ export default function NrsDashboard({ session }: { session: Session }) {
           )}
         </Card>
         <Card>
-          <h2 className="mb-3 text-sm font-semibold text-sand-700">Explanation drill-down</h2>
+          <h2 className="mb-3 text-sm font-semibold text-stone-900">Explanation drill-down</h2>
           {!selected ? (
-            <Empty>Select “Explain” on a score to see the full audit trail.</Empty>
+            <Empty title="No score selected">Select “Explain” on a score to see the full audit trail.</Empty>
           ) : !expl ? (
-            <p className="text-sm text-sand-500">Loading…</p>
+            <div aria-busy="true" aria-label="Loading explanation"><SkeletonRows rows={3} /></div>
           ) : (
             <div>
               <div className="mb-3 flex items-center gap-3">
@@ -154,25 +159,25 @@ export default function NrsDashboard({ session }: { session: Session }) {
                 <Badge tone={bandTone(expl.band)}>{expl.band}</Badge>
                 <span className="text-lg font-bold">{expl.score}</span>
               </div>
-              <div className="mb-3 text-xs text-sand-500">
+              <div className="mb-3 text-xs text-stone-600">
                 model {expl.model.id}@{expl.model.version} · pack {expl.rule_pack_version} ·{' '}
                 {new Date(expl.generated_at).toLocaleString()}
               </div>
               <ul className="space-y-3">
                 {expl.contributions.map((c) => (
-                  <li key={c.rule_id} className="rounded-lg border border-sand-200 p-3">
+                  <li key={c.rule_id} className="rounded-lg border border-neutral-200 p-3">
                     <div className="flex items-center justify-between">
-                      <span className="font-mono text-xs text-clay-600">{c.rule_id}</span>
-                      <span className="badge bg-clay-100 text-clay-700">+{c.points}</span>
+                      <span className="font-mono text-xs text-brand-700">{c.rule_id}</span>
+                      <span className="chip bg-info text-info-on">+{c.points}</span>
                     </div>
-                    <p className="mt-1 text-sm text-sand-800">{c.narrate}</p>
-                    <pre className="mt-2 overflow-x-auto rounded bg-sand-100 p-2 text-xs text-sand-600">
+                    <p className="mt-1 text-sm text-stone-900">{c.narrate}</p>
+                    <pre className="mt-2 overflow-x-auto rounded bg-neutral-100 p-2 text-xs text-stone-600">
                       {JSON.stringify(c.evidence.feature_row, null, 2)}
                     </pre>
                   </li>
                 ))}
                 {expl.contributions.length === 0 && (
-                  <Empty>No rule fired — baseline score.</Empty>
+                  <Empty title="No rule fired">Baseline score.</Empty>
                 )}
               </ul>
             </div>

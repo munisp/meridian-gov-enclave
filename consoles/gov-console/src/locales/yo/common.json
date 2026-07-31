@@ -1,0 +1,15 @@
+{
+  "app.name": "Meridian — Gov Console",
+  "app.zone": "Meridian · Agbègbè Olórí",
+  "app.tagline": "Agbègbè olórí · ẹnu-ọ̀nà àbòwábá · ìtúpalẹ̀ tó pamọ́",
+  "auth.signin": "Wọlé",
+  "auth.signin.keycloak": "Wọlé pẹ̀lú Keycloak",
+  "auth.signin.dev": "Wọlé (dev JWT)",
+  "auth.signingIn": "Ń wọlé…",
+  "auth.signout": "Jáde",
+  "lang.label": "Èdè",
+  "lang.en": "Gẹ̀ẹ́sì",
+  "lang.ha": "Hausa",
+  "lang.yo": "Yorùbá",
+  "lang.ig": "Igbo"
+}
