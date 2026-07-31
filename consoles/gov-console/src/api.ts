@@ -91,9 +91,13 @@ export async function api<T = unknown>(
   return data as T
 }
 
+// Meridian One §9 — money formatting delegates to the shared lib/format
+// module (kobo integers, Intl en-NG). fmtKobo stays as a null-safe wrapper.
+import { formatNGN } from './lib/format'
+
 export function fmtKobo(kobo: number | null | undefined): string {
   if (kobo === null || kobo === undefined) return '—'
-  return '₦' + (kobo / 100).toLocaleString('en-NG', { minimumFractionDigits: 2 })
+  return formatNGN(kobo)
 }
 
 export function short(id: string | null | undefined, n = 12): string {
