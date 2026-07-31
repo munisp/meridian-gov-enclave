@@ -20,6 +20,7 @@ import (
 	"time"
 
 	"github.com/munisp/meridian-gov-enclave/packages/authx"
+	"github.com/munisp/meridian-gov-enclave/packages/keyx/provider"
 )
 
 type ctxKey string
@@ -49,6 +50,24 @@ func main() {
 	if err != nil {
 		log.Fatalf("worm store: %v", err)
 	}
+	// Key provider abstraction (KEY_PROVIDER): dev default is a software
+	// receipt key under <dataRoot>/signing; hsm|pkcs11|cloud-kms route
+	// receipt signing to the HSM/KMS. Configured-but-unavailable provider is
+	// a hard startup failure (fail-closed — no silent software fallback).
+	keyProv, err := provider.NewFromEnv()
+	if err != nil {
+		log.Fatalf("key provider: %v", err)
+	}
+	receiptSigner, err := NewReceiptSigner(cfg.DataRoot, keyProv)
+	if err != nil {
+		log.Fatalf("receipt signer: %v", err)
+	}
+	if local != nil {
+		local.SetReceiptSigner(receiptSigner)
+	} else if api, ok := worm.(*APIWORMStore); ok {
+		api.SetReceiptSigner(receiptSigner)
+	}
+	log.Printf("key provider: mode=%s (evidence receipt signing)", keyProv.Mode())
 	s := &Server{cfg: cfg, authn: newAuthenticator(cfg),
 		http: &http.Client{Timeout: 10 * time.Second}, worm: worm, localWorm: local}
 

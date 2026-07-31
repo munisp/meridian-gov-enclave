@@ -19,6 +19,7 @@ import (
 
 	"github.com/munisp/meridian-gov-enclave/packages/authx"
 	"github.com/munisp/meridian-gov-enclave/packages/eventx"
+	"github.com/munisp/meridian-gov-enclave/packages/keyx/provider"
 	"github.com/munisp/meridian-gov-enclave/packages/storex"
 )
 
@@ -56,10 +57,19 @@ func main() {
 	if err != nil {
 		log.Fatal(err)
 	}
-	signer, err := NewFeedSigner(cfg.DataRoot)
+	// Key provider abstraction (KEY_PROVIDER): dev default is the software
+	// keypair under <dataRoot>/signing; hsm|pkcs11|cloud-kms route feed
+	// signing to the HSM/KMS. Configured-but-unavailable provider is a hard
+	// startup failure (fail-closed — never a silent software fallback).
+	keyProv, err := provider.NewFromEnv()
+	if err != nil {
+		log.Fatalf("key provider: %v", err)
+	}
+	signer, err := NewFeedSignerWithProvider(cfg.DataRoot, keyProv)
 	if err != nil {
 		log.Fatal(err)
 	}
+	log.Printf("key provider: mode=%s (attribution feed signing)", keyProv.Mode())
 	emitter := eventx.New("jrb", cfg.DataRoot)
 	defer emitter.Close()
 	s := &Server{
