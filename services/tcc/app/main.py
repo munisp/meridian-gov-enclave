@@ -15,6 +15,7 @@ from pydantic import BaseModel
 from . import core, ledger
 from .certs import CertificateSigner, SigningUnavailable
 from .config import get_settings
+from .key_provider import KeyProviderUnavailable, build_signer
 from .util import new_ulid, now_rfc3339, principal_from, problem
 
 settings = get_settings()
@@ -23,8 +24,12 @@ app = FastAPI(title="Meridian Gov-Enclave TCC", version=settings.version)
 store = core.TccStore()
 sim_ledger = ledger.SimLedger()
 try:
-    signer = CertificateSigner(settings.signing_key_pem, settings.prod)
-except SigningUnavailable:  # prod without key: fail closed at decide time
+    # KEY_PROVIDER: software default (unchanged); cloud-kms routes signing to
+    # the KMS REST shim; any other non-software mode fails closed at startup.
+    signer = build_signer(
+        lambda: CertificateSigner(settings.signing_key_pem, settings.prod))
+except (SigningUnavailable, KeyProviderUnavailable):
+    # prod without key / uninitialisable provider: fail closed at decide time
     signer = None
 
 PUBLIC_PATHS = {"/healthz", "/readyz", "/openapi.json", "/docs",
