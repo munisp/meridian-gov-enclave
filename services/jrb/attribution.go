@@ -9,7 +9,6 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
-	"sort"
 	"strings"
 	"time"
 
@@ -64,7 +63,7 @@ func LoadAttributionFormula(packsDir string) *AttributionFormula {
 }
 
 // StateConsumptionInput is a state's consumption and derivation shares (bps of
-the national totals) for a period.
+// the national totals) for a period.
 type StateConsumptionInput struct {
 	StateCode      string `json:"state_code"`
 	ConsumptionBps int    `json:"consumption_bps"`
@@ -151,7 +150,6 @@ func (f *AttributionFormula) BuildAttributionFeed(period string, poolKobo int64,
 		states[largestIdx].ConsumptionPortionKobo += rem
 		states[largestIdx].TotalKobo += rem
 	}
-	sort.Slice(states, func(i, j int) bool { return states[i].StateCode < states[j].StateCode })
 	return &AttributionFeed{
 		FeedID:   "feed-" + period + "-" + time.Now().UTC().Format("150405"),
 		Period:   period,
