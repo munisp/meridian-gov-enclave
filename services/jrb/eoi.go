@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -82,13 +83,28 @@ func (s *EOIStore) load() error {
 	return nil
 }
 
+func (s *EOIStore) loadPG() error {
+	docs, err := s.pg.LoadDocs(context.Background(), EOITable)
+	if err != nil {
+		return err
+	}
+	for id, raw := range docs {
+		var rec EOI
+		if err := json.Unmarshal(raw, &rec); err != nil {
+			return fmt.Errorf("decode eoi %s: %w", id, err)
+		}
+		s.byID[id] = &rec
+	}
+	return nil
+}
+
 func (s *EOIStore) persist(e *EOI) error {
 	data, err := json.MarshalIndent(e, "", "  ")
 	if err != nil {
 		return err
 	}
 	if s.pg != nil {
-		return s.pg.UpsertDoc(EOITable, e.ID, data)
+		return s.pg.UpsertDoc(context.Background(), EOITable, e.ID, data)
 	}
 	return os.WriteFile(filepath.Join(s.dir, e.ID+".json"), data, 0o644)
 }
