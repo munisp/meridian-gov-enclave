@@ -1,6 +1,7 @@
 package main
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
 )
@@ -53,10 +54,37 @@ func loadConfig() Config {
 		F5ConsumerURL:     os.Getenv("F5_CONSUMER_URL"),
 		JRBURL:            os.Getenv("JRB_URL"),
 		WHTReconURL:       os.Getenv("WHT_RECON_URL"),
-		InternalFlowToken: getenv("INTERNAL_FLOW_TOKEN", "dev-internal-token"),
+			InternalFlowToken: getenv("INTERNAL_FLOW_TOKEN", ""),
 		TLSCertFile:       os.Getenv("TLS_CERT_FILE"),
 		TLSKeyFile:        os.Getenv("TLS_KEY_FILE"),
 		MTLSCAFile:        os.Getenv("GATEWAY_MTLS_CA_FILE"),
 		RequireClientCert: os.Getenv("GATEWAY_REQUIRE_CLIENT_CERT") == "true",
 	}
+}
+
+// applyDevDefaults fills dev-only conveniences (never in prod).
+func (c *Config) applyDevDefaults() {
+	if (c.AuthMode == "dev" || c.AuthMode == "") && c.InternalFlowToken == "" {
+		c.InternalFlowToken = "dev-internal-token"
+	}
+}
+
+// Validate enforces the prod fail-closed contract (audit HIGH #7: dev auth
+// was the default and never failed closed). In any non-dev AUTH_MODE the
+// gateway must have server TLS, an explicit internal flow token and must not
+// be using the public dev JWT secret.
+func (c Config) Validate() error {
+	if c.AuthMode == "dev" || c.AuthMode == "" {
+		return nil
+	}
+	if c.TLSCertFile == "" || c.TLSKeyFile == "" {
+		return fmt.Errorf("AUTH_MODE=%s requires TLS_CERT_FILE/TLS_KEY_FILE (plain HTTP is dev-only)", c.AuthMode)
+	}
+	if c.InternalFlowToken == "" || c.InternalFlowToken == "dev-internal-token" {
+		return fmt.Errorf("AUTH_MODE=%s requires an explicit INTERNAL_FLOW_TOKEN (the dev default is forbidden)", c.AuthMode)
+	}
+	if c.AuthMode == "dev-jwt" && (c.JWTSecret == "" || c.JWTSecret == "meridian-dev-secret") {
+		return fmt.Errorf("AUTH_MODE=%s requires MERIDIAN_DEV_JWT_SECRET to be set to a non-default value", c.AuthMode)
+	}
+	return nil
 }
