@@ -15,6 +15,7 @@ from pydantic import BaseModel
 
 from . import core
 from .config import get_settings
+from .key_provider import build_signer
 from .util import new_ulid, principal_from, problem
 from .worm import WormStore
 
@@ -70,7 +71,9 @@ class Signer:
             return False
 
 
-signer = Signer(settings.signing_key_pem, settings.prod)
+# KEY_PROVIDER: software default (unchanged); cloud-kms routes signing to the
+# KMS REST shim; any other non-software mode fails closed at startup.
+signer = build_signer(lambda: Signer(settings.signing_key_pem, settings.prod))
 
 PUBLIC_PATHS = {"/healthz", "/readyz", "/openapi.json", "/docs",
                 "/docs/oauth2-redirect"}
