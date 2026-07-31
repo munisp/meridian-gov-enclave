@@ -5,6 +5,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"encoding/pem"
 	"errors"
 	"fmt"
 	"os"
@@ -181,11 +182,6 @@ func certFingerprint(pemStr string) (string, error) {
 	var der []byte
 	rest := []byte(pemStr)
 	for {
-		var block *struct {
-			Type  string
-			Bytes []byte
-		}
-		_ = block
 		b, r := pemDecode(rest)
 		if b == nil {
 			break
@@ -203,10 +199,19 @@ func certFingerprint(pemStr string) (string, error) {
 	return hex.EncodeToString(sum[:]), nil
 }
 
-// pemBlock mirrors encoding/pem.Block without importing twice.
+// pemBlock mirrors encoding/pem.Block for the fields certFingerprint needs.
 type pemBlock struct {
 	Type  string
 	Bytes []byte
+}
+
+// pemDecode is a thin wrapper over encoding/pem.Decode returning a pemBlock.
+func pemDecode(data []byte) (*pemBlock, []byte) {
+	b, rest := pem.Decode(data)
+	if b == nil {
+		return nil, rest
+	}
+	return &pemBlock{Type: b.Type, Bytes: b.Bytes}, rest
 }
 
 // Onboard registers an authority with a dev cert upload + fingerprint.
