@@ -1,0 +1,15 @@
+{
+  "app.name": "Meridian — Gov Console",
+  "app.zone": "Meridian · Sovereign Zone",
+  "app.tagline": "Sovereign enclave · audited cross-zone gateway · pseudonymised analytics",
+  "auth.signin": "Sign in",
+  "auth.signin.keycloak": "Sign in with Keycloak",
+  "auth.signin.dev": "Sign in (dev JWT)",
+  "auth.signingIn": "Signing in…",
+  "auth.signout": "Sign out",
+  "lang.label": "Language",
+  "lang.en": "English",
+  "lang.ha": "Hausa",
+  "lang.yo": "Yorùbá",
+  "lang.ig": "Igbo"
+}
