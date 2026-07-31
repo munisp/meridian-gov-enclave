@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"crypto/ed25519"
 	"crypto/rand"
 	"encoding/hex"
@@ -13,6 +14,8 @@ import (
 	"time"
 
 	"gopkg.in/yaml.v3"
+
+	"github.com/munisp/meridian-gov-enclave/packages/keyx/provider"
 )
 
 // AttributionFormula is the NTAA VAT attribution formula: 30% place of
@@ -172,6 +175,28 @@ func (f *AttributionFormula) BuildAttributionFeed(period string, poolKobo int64,
 type FeedSigner struct {
 	pub  ed25519.PublicKey
 	priv ed25519.PrivateKey
+	// prov, when non-nil and non-software, routes feed signing to the HSM/KMS
+	// key provider (KEY_PROVIDER=hsm|pkcs11|cloud-kms); priv stays nil.
+	prov provider.SignerProvider
+}
+
+// NewFeedSignerWithProvider loads the feed signer through the key-provider
+// abstraction. A nil or software-mode prov keeps the legacy dev keypair
+// behaviour (NewFeedSigner). A non-software prov signs via the HSM/KMS
+// "feed" key; construction fails closed if the provider cannot serve the
+// public key.
+func NewFeedSignerWithProvider(dataRoot string, prov provider.SignerProvider) (*FeedSigner, error) {
+	if prov == nil || prov.Mode() == "software" {
+		return NewFeedSigner(dataRoot)
+	}
+	pub, err := prov.PublicKey(context.Background(), "feed")
+	if err != nil {
+		return nil, fmt.Errorf("feed signer: provider public key: %w", err)
+	}
+	if len(pub) != ed25519.PublicKeySize {
+		return nil, fmt.Errorf("feed signer: provider returned %d-byte public key, want ed25519", len(pub))
+	}
+	return &FeedSigner{prov: prov, pub: ed25519.PublicKey(append([]byte(nil), pub...))}, nil
 }
 
 func NewFeedSigner(dataRoot string) (*FeedSigner, error) {
@@ -210,7 +235,15 @@ func (s *FeedSigner) Sign(feed *AttributionFeed) (*SignedFeedDoc, error) {
 	if err != nil {
 		return nil, err
 	}
-	sig := ed25519.Sign(s.priv, raw)
+	var sig []byte
+	if s.prov != nil {
+		sig, err = s.prov.Sign(context.Background(), "feed", raw)
+		if err != nil {
+			return nil, fmt.Errorf("feed sign: %w", err)
+		}
+	} else {
+		sig = ed25519.Sign(s.priv, raw)
+	}
 	return &SignedFeedDoc{
 		Feed:      raw,
 		Signature: hex.EncodeToString(sig),
