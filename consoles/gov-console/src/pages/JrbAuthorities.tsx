@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useState } from 'react'
 import { api, Session, short } from '../api'
-import { Badge, Card, Empty, ErrorBox, PageTitle } from '../components/ui'
+import { Badge, Card, Empty, ErrorBox, PageTitle, SkeletonRows } from '../components/ui'
 
 interface Authority {
   id: string
@@ -15,14 +15,17 @@ export default function JrbAuthorities({ session }: { session: Session }) {
   const [rows, setRows] = useState<Authority[]>([])
   const [error, setError] = useState<string | null>(null)
   const [filter, setFilter] = useState('')
+  const [loading, setLoading] = useState(true)
 
   const load = useCallback(async () => {
     try {
       const data = await api<{ authorities: Authority[] }>('jrb', '/v1/authorities', { session })
       setRows(data.authorities || [])
       setError(null)
+      setLoading(false)
     } catch (e) {
       setError((e as Error).message)
+      setLoading(false)
     }
   }, [session])
 
@@ -43,30 +46,33 @@ export default function JrbAuthorities({ session }: { session: Session }) {
       <ErrorBox error={error} />
       <div className="mb-4 flex items-center gap-2">
         <input
+          aria-label="Filter authorities"
           className="input w-64"
           placeholder="filter authorities…"
           value={filter}
           onChange={(e) => setFilter(e.target.value)}
         />
-        <span className="text-sm text-sand-500">{shown.length} of {rows.length}</span>
+        <span className="text-sm text-stone-600">{shown.length} of {rows.length}</span>
       </div>
       <Card>
-        {shown.length === 0 ? (
-          <Empty>No authorities match.</Empty>
+        {loading ? (
+          <div aria-busy="true" aria-label="Loading authorities"><SkeletonRows /></div>
+        ) : shown.length === 0 ? (
+          <Empty title="No authorities match">Try a different filter.</Empty>
         ) : (
           <table className="w-full">
             <thead>
-              <tr className="border-b border-sand-200">
-                <th className="th">ID</th>
-                <th className="th">Authority</th>
-                <th className="th">Kind</th>
-                <th className="th">Status</th>
-                <th className="th">Cert fingerprint</th>
+              <tr className="border-b border-neutral-200">
+                <th scope="col" className="th">ID</th>
+                <th scope="col" className="th">Authority</th>
+                <th scope="col" className="th">Kind</th>
+                <th scope="col" className="th">Status</th>
+                <th scope="col" className="th">Cert fingerprint</th>
               </tr>
             </thead>
             <tbody>
               {shown.map((a) => (
-                <tr key={a.id} className="border-b border-sand-100 hover:bg-sand-50">
+                <tr key={a.id} className="border-b border-neutral-100 hover:bg-neutral-50">
                   <td className="td font-mono text-xs">{a.id}</td>
                   <td className="td">{a.name}</td>
                   <td className="td text-xs">{a.kind}</td>
@@ -75,7 +81,7 @@ export default function JrbAuthorities({ session }: { session: Session }) {
                       {a.status}
                     </Badge>
                   </td>
-                  <td className="td font-mono text-xs text-sand-500">
+                  <td className="td font-mono text-xs text-stone-600">
                     {a.cert_fingerprint ? short(a.cert_fingerprint, 20) : '—'}
                   </td>
                 </tr>

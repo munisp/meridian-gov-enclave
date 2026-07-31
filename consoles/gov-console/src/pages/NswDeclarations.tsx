@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useState } from 'react'
 import { api, fmtKobo, Session, short } from '../api'
-import { Badge, Card, Empty, ErrorBox, PageTitle } from '../components/ui'
+import { Badge, Card, Empty, ErrorBox, PageTitle, SkeletonRows } from '../components/ui'
+import Field from '../components/Field'
 
 interface LandingCost {
   declaration_id: string
@@ -28,6 +29,7 @@ export default function NswDeclarations({ session }: { session: Session }) {
   const [error, setError] = useState<string | null>(null)
   const [paste, setPaste] = useState('')
   const [msg, setMsg] = useState<string | null>(null)
+  const [loading, setLoading] = useState(true)
 
   const load = useCallback(async () => {
     try {
@@ -44,8 +46,10 @@ export default function NswDeclarations({ session }: { session: Session }) {
       )
       setSilver(sv.rows || [])
       setError(null)
+      setLoading(false)
     } catch (e) {
       setError((e as Error).message)
+      setLoading(false)
     }
   }, [session])
 
@@ -80,40 +84,44 @@ export default function NswDeclarations({ session }: { session: Session }) {
       />
       <ErrorBox error={error} />
       <Card className="mb-4">
-        <h2 className="mb-2 text-sm font-semibold text-sand-700">Ingest declarations (JSON array)</h2>
-        <textarea
-          className="input mb-2 h-28 font-mono text-xs"
-          placeholder='[{"declaration_id":"NSW-100","importer_tin":"12345678-0001","hs_code":"8703.22","customs_value_kobo":500000000,"duty_kobo":100000000,"port_code":"NGAPP","declared_at":"2026-07-20T10:00:00Z"}]'
-          value={paste}
-          onChange={(e) => setPaste(e.target.value)}
-        />
+        <Field label="Ingest declarations (JSON array)" id="nsw-paste" hint="Paste a JSON array of declaration records">
+          <textarea
+            id="nsw-paste"
+            className="input mb-2 h-28 font-mono text-xs"
+            placeholder='[{"declaration_id":"NSW-100","importer_tin":"12345678-0001","hs_code":"8703.22","customs_value_kobo":500000000,"duty_kobo":100000000,"port_code":"NGAPP","declared_at":"2026-07-20T10:00:00Z"}]'
+            value={paste}
+            onChange={(e) => setPaste(e.target.value)}
+          />
+        </Field>
         <div className="flex items-center gap-3">
           <button className="btn btn-primary" onClick={submit} disabled={!paste.trim()}>
             POST /ingest/nsw/declarations
           </button>
-          {msg && <span className="text-sm text-moss-600">{msg}</span>}
+          {msg && <span aria-live="polite" className="text-sm text-success-strong">{msg}</span>}
         </div>
       </Card>
       <Card>
-        <h2 className="mb-3 text-sm font-semibold text-sand-700">Import-VAT landing-cost product (gold)</h2>
-        {rows.length === 0 ? (
-          <Empty>No declarations ingested yet.</Empty>
+        <h2 className="mb-3 text-sm font-semibold text-stone-900">Import-VAT landing-cost product (gold)</h2>
+        {loading ? (
+          <div aria-busy="true" aria-label="Loading declarations"><SkeletonRows /></div>
+        ) : rows.length === 0 ? (
+          <Empty title="No declarations yet">Ingest declarations above to populate the landing-cost product.</Empty>
         ) : (
           <table className="w-full">
             <thead>
-              <tr className="border-b border-sand-200">
-                <th className="th">Declaration</th>
-                <th className="th">Importer</th>
-                <th className="th">TIN status</th>
-                <th className="th">HS / Port</th>
-                <th className="th">Customs value</th>
-                <th className="th">Landing cost</th>
-                <th className="th">Import VAT (7.5%)</th>
+              <tr className="border-b border-neutral-200">
+                <th scope="col" className="th">Declaration</th>
+                <th scope="col" className="th">Importer</th>
+                <th scope="col" className="th">TIN status</th>
+                <th scope="col" className="th">HS / Port</th>
+                <th scope="col" className="th">Customs value</th>
+                <th scope="col" className="th">Landing cost</th>
+                <th scope="col" className="th">Import VAT (7.5%)</th>
               </tr>
             </thead>
             <tbody>
               {rows.map((r) => (
-                <tr key={r.declaration_id} className="border-b border-sand-100 hover:bg-sand-50">
+                <tr key={r.declaration_id} className="border-b border-neutral-100 hover:bg-neutral-50">
                   <td className="td font-mono text-xs">{r.declaration_id}</td>
                   <td className="td font-mono text-xs">{short(r.pseudo_tin, 16)}</td>
                   <td className="td">
