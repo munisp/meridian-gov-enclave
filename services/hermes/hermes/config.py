@@ -82,6 +82,13 @@ class Settings:
     whatsapp_phone_number_id: str = os.environ.get("WHATSAPP_PHONE_NUMBER_ID", "")
     whatsapp_graph_url: str = os.environ.get("WHATSAPP_GRAPH_URL", "https://graph.facebook.com")
     whatsapp_max_chars: int = int(os.environ.get("WHATSAPP_MAX_CHARS", "4096"))
+    # WhatsApp onboarding + stores (REDIS_URL above is reused; in-memory
+    # fallback when unset/unreachable). Session TTL matches memory.py (24h);
+    # dedup TTL 48h; OTP 6-digit, 10-min TTL, 3 attempts.
+    whatsapp_session_ttl_s: int = int(os.environ.get("WHATSAPP_SESSION_TTL_S", str(24 * 3600)))
+    whatsapp_dedup_ttl_s: int = int(os.environ.get("WHATSAPP_DEDUP_TTL_S", str(48 * 3600)))
+    whatsapp_otp_ttl_s: int = int(os.environ.get("WHATSAPP_OTP_TTL_S", "600"))
+    whatsapp_otp_max_attempts: int = int(os.environ.get("WHATSAPP_OTP_MAX_ATTEMPTS", "3"))
     endpoints: dict = field(default_factory=lambda: dict(ENDPOINTS))
 
 
