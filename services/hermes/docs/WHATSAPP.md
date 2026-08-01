@@ -45,16 +45,20 @@ residual — bound turns carry a scoped session token):
    mod-11 check digit (12th digit) are validated locally, mirroring the
    services/wht validator.
 3. A 6-digit OTP is issued (default 10-minute TTL, 3 attempts then
-   lockout) and delivered through the `OtpSender` seam (notification
-   service). Without a wired notification service the `SimOtpSender`
-   logs the code with an honest `[SIM]` tag.
+   lockout) and delivered through the `OtpSender` seam: the REAL
+   `HttpOtpSender` posts to the notification service
+   (`{NOTIFICATION_URL}/v1/send`, channel `sms`, template `wa_otp`,
+   one retry on 5xx) and fails closed with an honest "couldn't send the
+   verification code" reply; the dev fallback `SimOtpSender` logs the
+   code with an honest `[SIM]` tag.
 4. On success the binding `{wa_id, tin, consent_ref, ts}` is persisted
    with an NDPA consent note, and a scoped session token is minted via
-   the `TokenIssuer` seam and attached to the AgentLoop context.
-   **Production must wire a `KeycloakTokenIssuer` that exchanges the
-   verified binding for a real Keycloak token via the identity service
-   (token-exchange grant); the default `SimTokenIssuer` returns a
-   `wa-sim-*` token — the exchange is SIM, the seam is real.**
+   the `TokenIssuer` seam and attached to the AgentLoop context. The
+   REAL `IdentityTokenIssuer` exchanges the verified binding at
+   `{IDENTITY_URL}/v1/whatsapp/exchange` (`{wa_id, tin, consent_ref}`
+   -> `{access_token, ttl}`); the exchange is fail-closed (no token, no
+   binding). The dev fallback `SimTokenIssuer` returns a `wa-sim-*`
+   token with an honest log.
 
 Commands (case-insensitive):
 
@@ -100,6 +104,19 @@ unchanged (bound or not).
 | WHATSAPP_DEDUP_TTL_S      | no              | message-id dedup TTL, default 172800 (48h) |
 | WHATSAPP_OTP_TTL_S        | no              | onboarding OTP TTL, default 600 (10 min) |
 | WHATSAPP_OTP_MAX_ATTEMPTS | no              | OTP attempts before lockout, default 3 |
+| NOTIFICATION_URL          | yes (fail-closed) | notification-service base URL; REAL OTP delivery via `POST {url}/v1/send` (`HttpOtpSender`); unset in dev -> SIM with honest log |
+| OTP_SEND_TIMEOUT_S        | no              | OTP send timeout, default 5 (one retry on 5xx) |
+| IDENTITY_URL              | yes (fail-closed) | identity-service base URL; REAL token exchange via `POST {url}/v1/whatsapp/exchange` (`IdentityTokenIssuer`); unset in dev -> SIM with honest log |
+| IDENTITY_EXCHANGE_TIMEOUT_S | no            | token-exchange timeout, default 10 |
+
+`PROFILE=prod` requires both `NOTIFICATION_URL` and `IDENTITY_URL` when the
+WhatsApp channel is active — otherwise the service refuses to start
+(`RuntimeError`, fail-closed; SIM onboarding is never allowed in prod).
+Dev profile falls back to `SimOtpSender` / `SimTokenIssuer` with honest
+`SIM` log lines. Both REAL clients fail closed at runtime too: an OTP
+delivery failure drops the challenge and tells the user "couldn't send the
+verification code ... try again"; a token-exchange failure aborts the
+binding (nothing persisted) and asks the user to resend their TIN.
 
 ## REAL vs SIM
 
@@ -113,8 +130,8 @@ unchanged (bound or not).
 | TIN format + check-digit validation     | REAL, tested (mirrors services/wht local validator) |
 | Onboarding state machine (prompt, TIN, OTP verify, lockout, UNLINK, STATUS) | REAL, tested |
 | Binding record + NDPA consent ref       | REAL, tested |
-| OTP delivery                            | SIM by default (`SimOtpSender` logs `[SIM]`); wire an `OtpSender` over the notification service for production |
-| Scoped session token                    | SIM (`wa-sim-*` via `SimTokenIssuer`); production must exchange the verified binding for a real Keycloak token via the identity service (`TokenIssuer` seam is wired) |
+| OTP delivery                            | REAL when `NOTIFICATION_URL` set (`HttpOtpSender` -> `POST /v1/send`, sms `wa_otp` template, 5xx retry once, fail-closed); SIM (`SimOtpSender` logs `[SIM]`) as dev fallback; prod requires the URL (fail-closed start) |
+| Scoped session token                    | REAL when `IDENTITY_URL` set (`IdentityTokenIssuer` -> `POST /v1/whatsapp/exchange` `{wa_id, tin, consent_ref}` -> `{access_token, ttl}`, fail-closed); SIM (`wa-sim-*` via `SimTokenIssuer`) as dev fallback; prod requires the URL (fail-closed start) |
 | Interactive confirm/cancel buttons      | REAL payloads, tested with injected transport |
 | Meta message delivery (send)            | SIM unless `WHATSAPP_ACCESS_TOKEN` + `WHATSAPP_PHONE_NUMBER_ID` are set; SIM sends are logged with a `[SIM]` tag and return a fake `sim-wamid-*` id — no real Meta call is made |
 
@@ -130,3 +147,14 @@ scoped token), invalid TIN, wrong OTP, expiry, 3-attempt lockout, UNLINK,
 STATUS masking, other-TIN block for bound users, Redis stores via injected
 fake client, unreachable/unset `REDIS_URL` fallback log lines, and dedup
 across a simulated restart.
+
+`tests/test_wa_clients.py` — 19 tests, fully offline (transports injected):
+`HttpOtpSender` success payload, 5xx retry-once, 5xx-twice fail, 4xx no
+retry, timeout, missing base URL; `IdentityTokenIssuer` success payload +
+token, 401, network error, missing `access_token`, missing base URL; wiring
+(REAL selection when URLs set, dev SIM fallback log lines, prod fail-closed
+start without either URL, prod start with both); end-to-end onboarding over
+the real-impl classes with fake transports (OTP delivered via notification
+payload, code reply, identity exchange asserted, binding token + consent_ref
+match), OTP-delivery failure (honest reply, challenge dropped), and
+token-exchange failure (binding aborted, nothing persisted).
