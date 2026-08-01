@@ -21,6 +21,7 @@ import hashlib
 import hmac
 import json
 import logging
+import re
 import urllib.request
 import uuid
 from typing import Any, Callable, Optional
@@ -34,12 +35,28 @@ from ..agent.audit import AuditChain
 from ..agent.guardrails import redact_text
 from ..config import Settings
 from .prompts import system_prompt
+from .wa_onboarding import (OtpManager, OtpSender, SimOtpSender, SimTokenIssuer,
+                            TokenIssuer, WaStores, build_wa_stores, mask_tin,
+                            new_binding, valid_tin, TIN_RE)
 
 log = logging.getLogger("hermes.whatsapp")
 
 GRAPH_VERSION = "v21.0"
 CONFIRM_PREFIX = "wa_confirm:"
 CANCEL_PREFIX = "wa_cancel:"
+
+_OTP_RE = re.compile(r"^\d{6}$")
+# Heuristic: requests that need a bound TIN (TIN-scoped tools). General
+# questions (e.g. "What is VAT?") stay answerable without binding.
+_TIN_SCOPED_RE = re.compile(
+    r"\bTIN\b|obligation|what do i owe|owe\b|estimate|liability|"
+    r"file (a )?nil|nil return|calendar|due date|deadline", re.IGNORECASE)
+
+ONBOARDING_PROMPT = (
+    "To use taxpayer services here, link your TIN to this WhatsApp number. "
+    "Reply with your TIN (format NNNNNNNN-NNNN). We'll verify it with a "
+    "one-time code. Your consent is recorded per NDPA; send UNLINK anytime "
+    "to remove the link.")
 
 
 # ---------------------------------------------------------------------------
@@ -165,30 +182,14 @@ def verify_signature(app_secret: str, raw_body: bytes, header: str) -> bool:
 # ---------------------------------------------------------------------------
 # Route wiring
 # ---------------------------------------------------------------------------
-class _SeenIds:
-    """Bounded dedup set for Meta message ids."""
-
-    def __init__(self, capacity: int = 4096):
-        self.capacity = capacity
-        self._ids: list[str] = []
-        self._set: set[str] = set()
-
-    def is_new(self, mid: str) -> bool:
-        if not mid:
-            return True
-        if mid in self._set:
-            return False
-        self._set.add(mid)
-        self._ids.append(mid)
-        if len(self._ids) > self.capacity:
-            self._set.discard(self._ids.pop(0))
-        return True
-
-
 def add_whatsapp_routes(app: FastAPI, s: Settings, audit: AuditChain,
                         memory: MemoryStore,
                         build_loop: Callable[[str, str], AgentLoop],
-                        client: Optional[WhatsAppClient] = None) -> WhatsAppClient:
+                        client: Optional[WhatsAppClient] = None,
+                        stores: Optional[WaStores] = None,
+                        otp: Optional[OtpManager] = None,
+                        otp_sender: Optional[OtpSender] = None,
+                        token_issuer: Optional[TokenIssuer] = None) -> WhatsAppClient:
     if s.profile == "prod" and not s.whatsapp_app_secret:
         raise RuntimeError(
             "hermes whatsapp: PROFILE=prod requires WHATSAPP_APP_SECRET "
@@ -204,22 +205,42 @@ def add_whatsapp_routes(app: FastAPI, s: Settings, audit: AuditChain,
         log.warning("hermes whatsapp: WHATSAPP_APP_SECRET unset; inbound "
                     "signature verification is fail-closed (all POSTs -> 401)")
 
-    sessions: dict[str, dict[str, Any]] = {}   # wa_id -> session state
-    app.state.whatsapp_sessions = sessions     # exposed for ops/tests
-    seen = _SeenIds()
+    # Stores: Redis when REDIS_URL is reachable, honest in-memory fallback.
+    stores = stores or build_wa_stores(
+        redis_url=s.redis_url, session_ttl_s=s.whatsapp_session_ttl_s,
+        dedup_ttl_s=s.whatsapp_dedup_ttl_s)
+    otp = otp or OtpManager(ttl_s=s.whatsapp_otp_ttl_s,
+                            max_attempts=s.whatsapp_otp_max_attempts)
+    otp_sender = otp_sender or SimOtpSender()
+    token_issuer = token_issuer or SimTokenIssuer()
+    app.state.whatsapp_sessions = stores.sessions   # exposed for ops/tests
+    app.state.whatsapp_stores = stores
 
     def _session(wa_id: str) -> dict[str, Any]:
-        st = sessions.get(wa_id)
+        st = stores.sessions.get(wa_id)
         if st is None:
             st = {"session_id": str(uuid.uuid4()), "lang": "en", "pending": None}
-            sessions[wa_id] = st
+            stores.sessions.put(wa_id, st)
         return st
+
+    def _save(wa_id: str, st: dict[str, Any]) -> None:
+        stores.sessions.put(wa_id, st)
+
+    def _apply_binding(wa_id: str, st: dict[str, Any]) -> bool:
+        """Mirror a persisted binding into the session. Returns bound?"""
+        b = stores.binding.get(wa_id)
+        if b is None:
+            return bool(st.get("tin"))   # ops/test-seeded session TIN
+        st["tin"], st["token"] = b.tin, b.token
+        _save(wa_id, st)
+        return True
 
     def _run_agent(wa_id: str, text: str, confirmed: bool = False) -> None:
         st = _session(wa_id)
         lang = st["lang"]
         ctx = UserContext(
-            sub=f"wa:{wa_id}", roles=["nrs.taxpayer"], token="",
+            sub=f"wa:{wa_id}", roles=["nrs.taxpayer"],
+            token=st.get("token", ""),
             agent="taxpayer-copilot", session_id=st["session_id"],
             channel="whatsapp", lang=lang, tin=st.get("tin", ""),
             linked_tins={st["tin"]} if st.get("tin") else set(),
@@ -228,6 +249,7 @@ def add_whatsapp_routes(app: FastAPI, s: Settings, audit: AuditChain,
         result = loop.run_turn(ctx, text, system_prompt=system_prompt("taxpayer-copilot", lang))
         if result.confirmation_request is not None:
             st["pending"] = {"message": text}
+            _save(wa_id, st)
             prompt = redact_text(result.confirmation_request["prompt"])
             wa.send_buttons(wa_id, prompt,
                             [(CONFIRM_PREFIX + st["session_id"], "Confirm"),
@@ -237,9 +259,105 @@ def add_whatsapp_routes(app: FastAPI, s: Settings, audit: AuditChain,
         for chunk in chunk_text(answer, s.whatsapp_max_chars):
             wa.send_text(wa_id, chunk)
 
+    def _onboard_text(wa_id: str, st: dict[str, Any], text: str) -> bool:
+        """TIN-binding onboarding for unbound numbers. Returns True when the
+        message was consumed by the onboarding/command flow."""
+        cmd = text.strip()
+        upper = cmd.upper()
+
+        if upper == "UNLINK":
+            if stores.binding.get(wa_id) is not None or st.get("tin"):
+                stores.binding.delete(wa_id)
+                st["tin"], st["token"] = "", ""
+                _save(wa_id, st)
+                wa.send_text(wa_id, "Your TIN link has been removed and your "
+                                    "consent withdrawn. TIN-scoped services are "
+                                    "now disabled for this number.")
+            else:
+                wa.send_text(wa_id, "No TIN is linked to this WhatsApp number.")
+            return True
+
+        if upper == "STATUS":
+            b = stores.binding.get(wa_id)
+            if b is not None:
+                wa.send_text(wa_id, f"Bound TIN: {mask_tin(b.tin)} "
+                                    f"(consent ref {b.consent_ref}). "
+                                    "Send UNLINK to remove the link.")
+            elif st.get("tin"):
+                wa.send_text(wa_id, f"Bound TIN: {mask_tin(st['tin'])}")
+            else:
+                wa.send_text(wa_id, "No TIN is linked to this WhatsApp number. "
+                                    + ONBOARDING_PROMPT)
+            return True
+
+        bound = _apply_binding(wa_id, st)
+        if not bound:
+            # OTP challenge outstanding -> expect the 6-digit code. (Track via
+            # session flag so an expired challenge still yields an honest
+            # "expired" reply instead of falling through to the agent.)
+            if st.get("onboarding_tin"):
+                if not _OTP_RE.match(cmd):
+                    wa.send_text(wa_id, "Please reply with the 6-digit code we "
+                                        "sent you to finish linking your TIN.")
+                    return True
+                outcome = otp.verify(wa_id, cmd)
+                if outcome == "ok":
+                    ch_tin = st.get("onboarding_tin", "")
+                    binding = new_binding(wa_id, ch_tin,
+                                          token_issuer.issue(wa_id, ch_tin))
+                    stores.binding.put(binding)
+                    st["tin"], st["token"] = binding.tin, binding.token
+                    st.pop("onboarding_tin", None)
+                    _save(wa_id, st)
+                    log.info("whatsapp: TIN bound wa_id=%s tin=%s consent_ref=%s",
+                             wa_id, mask_tin(binding.tin), binding.consent_ref)
+                    wa.send_text(wa_id, f"TIN {mask_tin(binding.tin)} is now linked "
+                                        "to this number. You can ask about your "
+                                        "obligations, estimates and filings. "
+                                        "Send STATUS to view the link or UNLINK "
+                                        "to remove it.")
+                elif outcome == "wrong":
+                    wa.send_text(wa_id, "That code is incorrect. Please try again "
+                                        f"({otp.max_attempts} attempts allowed).")
+                elif outcome == "locked":
+                    st.pop("onboarding_tin", None)
+                    _save(wa_id, st)
+                    wa.send_text(wa_id, "Too many incorrect codes. For your "
+                                        "security the linking attempt was "
+                                        "cancelled - send your TIN again to "
+                                        "restart.")
+                else:  # expired / no_challenge
+                    st.pop("onboarding_tin", None)
+                    _save(wa_id, st)
+                    wa.send_text(wa_id, "That code has expired. Send your TIN "
+                                        "again to get a new code.")
+                return True
+
+            # TIN submission -> validate + issue OTP.
+            if TIN_RE.match(cmd):
+                if not valid_tin(cmd):
+                    wa.send_text(wa_id, "That TIN is not valid (format "
+                                        "NNNNNNNN-NNNN with check digit). "
+                                        "Please check and resend.")
+                    return True
+                code = otp.start(wa_id, cmd)
+                st["onboarding_tin"] = cmd
+                _save(wa_id, st)
+                otp_sender.send_otp(wa_id, code, otp.ttl_s)
+                wa.send_text(wa_id, "We've sent you a 6-digit verification code "
+                                    f"(valid {otp.ttl_s // 60} minutes). Reply "
+                                    "with the code to link your TIN.")
+                return True
+
+            # TIN-scoped request from an unbound number -> onboarding prompt.
+            if _TIN_SCOPED_RE.search(text):
+                wa.send_text(wa_id, ONBOARDING_PROMPT)
+                return True
+        return False
+
     def _process(messages: list[dict[str, Any]]) -> None:
         for msg in messages:
-            if not seen.is_new(msg["id"]):
+            if not stores.dedup.is_new(msg["id"]):
                 log.info("whatsapp: duplicate message id=%s skipped", msg["id"])
                 continue
             wa_id, text = msg["from"], msg["text"]
@@ -247,16 +365,21 @@ def add_whatsapp_routes(app: FastAPI, s: Settings, audit: AuditChain,
                 continue
             if msg["kind"] == "button":
                 st = _session(wa_id)
+                _apply_binding(wa_id, st)
                 if text.startswith(CONFIRM_PREFIX) and st.get("pending"):
                     original = st.pop("pending")["message"]
+                    _save(wa_id, st)
                     _run_agent(wa_id, original, confirmed=True)
                 elif text.startswith(CANCEL_PREFIX):
                     st["pending"] = None
+                    _save(wa_id, st)
                     wa.send_text(wa_id, "Action cancelled.")
                 else:
                     wa.send_text(wa_id, "No pending action to confirm.")
             else:
-                _run_agent(wa_id, text)
+                st = _session(wa_id)
+                if not _onboard_text(wa_id, st, text):
+                    _run_agent(wa_id, text)
 
     @app.get("/v1/whatsapp/webhook")
     def whatsapp_verify(request: Request):

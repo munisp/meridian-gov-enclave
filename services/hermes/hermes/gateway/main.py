@@ -51,7 +51,9 @@ def truncate_ussd(text: str, max_chars: int) -> str:
     return text[: max_chars - 1].rstrip() + "\u2026"
 
 
-def create_app(settings: Optional[Settings] = None, whatsapp_client=None) -> FastAPI:
+def create_app(settings: Optional[Settings] = None, whatsapp_client=None,
+               whatsapp_stores=None, whatsapp_otp=None,
+               whatsapp_otp_sender=None, whatsapp_token_issuer=None) -> FastAPI:
     s = settings or get_settings()
     app = FastAPI(title="hermes", version=s.version)
     audit = AuditChain(build_sink(s.kafka_bootstrap, s.audit_topic, s.audit_jsonl_path))
@@ -115,7 +117,10 @@ def create_app(settings: Optional[Settings] = None, whatsapp_client=None) -> Fas
             tool_calls=len(result.tool_calls))
 
     # WhatsApp Business Cloud channel (fail-closed in prod when unconfigured)
-    add_whatsapp_routes(app, s, audit, memory, build_loop, client=whatsapp_client)
+    add_whatsapp_routes(app, s, audit, memory, build_loop, client=whatsapp_client,
+                        stores=whatsapp_stores, otp=whatsapp_otp,
+                        otp_sender=whatsapp_otp_sender,
+                        token_issuer=whatsapp_token_issuer)
 
     return app
 
