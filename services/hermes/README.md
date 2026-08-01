@@ -20,6 +20,8 @@ hermes/
                        # (7y retention; JSONL fallback when Kafka unreachable)
   agent/memory.py      # session memory TTL 24h, refs not PII (Redis or embedded fallback)
   gateway/main.py      # FastAPI /v1/chat (web + USSD bridge), /healthz /readyz
+  gateway/whatsapp.py  # WhatsApp Cloud channel: /v1/whatsapp/webhook (HMAC, dedup,
+                       # interactive confirm buttons, SIM send mode) - docs/WHATSAPP.md
   gateway/auth.py      # Keycloak RS256, fail-closed in prod (sibling analytics pattern)
   gateway/prompts.py   # multilingual system prompts (en/ha/yo/ig/pcm)
   eval/cases.py        # 46 real cases (happy / adversarial / groundedness)
@@ -59,4 +61,8 @@ python -m pytest tests -q
 python -m hermes.eval.runner     # gates: accuracy>=90%, refusal 100%, groundedness>=95%
 ```
 
-USSD answers are truncated to 160 chars (`HERMES_USSD_MAX_CHARS`).
+USSD answers are truncated to 160 chars (`HERMES_USSD_MAX_CHARS`). The
+WhatsApp Business Cloud channel (docs/WHATSAPP.md) verifies Meta webhook
+signatures (HMAC-SHA256, fail-closed), dedups by message id, chunks answers
+at 4096 chars, delivers confirmation flows as interactive buttons, and runs
+the send client in honest `[SIM]` mode when Cloud API creds are absent.

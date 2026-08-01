@@ -75,6 +75,13 @@ class Settings:
     memory_ttl_s: int = int(os.environ.get("HERMES_MEMORY_TTL_S", str(24 * 3600)))
     # USSD
     ussd_max_chars: int = int(os.environ.get("HERMES_USSD_MAX_CHARS", "160"))
+    # WhatsApp Business Cloud channel (docs/WHATSAPP.md)
+    whatsapp_verify_token: str = os.environ.get("WHATSAPP_VERIFY_TOKEN", "")
+    whatsapp_app_secret: str = os.environ.get("WHATSAPP_APP_SECRET", "")
+    whatsapp_access_token: str = os.environ.get("WHATSAPP_ACCESS_TOKEN", "")
+    whatsapp_phone_number_id: str = os.environ.get("WHATSAPP_PHONE_NUMBER_ID", "")
+    whatsapp_graph_url: str = os.environ.get("WHATSAPP_GRAPH_URL", "https://graph.facebook.com")
+    whatsapp_max_chars: int = int(os.environ.get("WHATSAPP_MAX_CHARS", "4096"))
     endpoints: dict = field(default_factory=lambda: dict(ENDPOINTS))
 
 

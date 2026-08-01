@@ -19,6 +19,7 @@ from ..llm.ollama import OllamaAdapter
 from ..llm.rule import RuleAdapter
 from .auth import principal_from, problem
 from .prompts import system_prompt
+from .whatsapp import add_whatsapp_routes
 
 log = logging.getLogger("hermes.gateway")
 
@@ -50,7 +51,7 @@ def truncate_ussd(text: str, max_chars: int) -> str:
     return text[: max_chars - 1].rstrip() + "\u2026"
 
 
-def create_app(settings: Optional[Settings] = None) -> FastAPI:
+def create_app(settings: Optional[Settings] = None, whatsapp_client=None) -> FastAPI:
     s = settings or get_settings()
     app = FastAPI(title="hermes", version=s.version)
     audit = AuditChain(build_sink(s.kafka_bootstrap, s.audit_topic, s.audit_jsonl_path))
@@ -112,6 +113,9 @@ def create_app(settings: Optional[Settings] = None) -> FastAPI:
             channel=req.channel, session_id=session_id,
             confirmation_request=result.confirmation_request,
             tool_calls=len(result.tool_calls))
+
+    # WhatsApp Business Cloud channel (fail-closed in prod when unconfigured)
+    add_whatsapp_routes(app, s, audit, memory, build_loop, client=whatsapp_client)
 
     return app
 
