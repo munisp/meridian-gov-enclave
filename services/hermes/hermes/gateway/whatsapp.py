@@ -35,7 +35,8 @@ from ..agent.audit import AuditChain
 from ..agent.guardrails import redact_text
 from ..config import Settings
 from .prompts import system_prompt
-from .wa_onboarding import (OtpManager, OtpSender, SimOtpSender, SimTokenIssuer,
+from .wa_onboarding import (IdentityExchangeError, OtpDeliveryError, OtpManager,
+                            OtpSender, SimOtpSender, SimTokenIssuer,
                             TokenIssuer, WaStores, build_wa_stores, mask_tin,
                             new_binding, valid_tin, TIN_RE)
 
@@ -303,8 +304,20 @@ def add_whatsapp_routes(app: FastAPI, s: Settings, audit: AuditChain,
                 outcome = otp.verify(wa_id, cmd)
                 if outcome == "ok":
                     ch_tin = st.get("onboarding_tin", "")
-                    binding = new_binding(wa_id, ch_tin,
-                                          token_issuer.issue(wa_id, ch_tin))
+                    binding = new_binding(wa_id, ch_tin, "")
+                    try:
+                        binding.token = token_issuer.issue(
+                            wa_id, ch_tin, binding.consent_ref)
+                    except IdentityExchangeError as e:
+                        # Fail-closed: no binding without a scoped token.
+                        st.pop("onboarding_tin", None)
+                        _save(wa_id, st)
+                        log.error("whatsapp: binding aborted, token exchange "
+                                  "failed wa_id=%s: %s", wa_id, e)
+                        wa.send_text(wa_id, "We couldn't complete the TIN link "
+                                            "right now - please send your TIN "
+                                            "again to retry.")
+                        return True
                     stores.binding.put(binding)
                     st["tin"], st["token"] = binding.tin, binding.token
                     st.pop("onboarding_tin", None)
@@ -343,7 +356,17 @@ def add_whatsapp_routes(app: FastAPI, s: Settings, audit: AuditChain,
                 code = otp.start(wa_id, cmd)
                 st["onboarding_tin"] = cmd
                 _save(wa_id, st)
-                otp_sender.send_otp(wa_id, code, otp.ttl_s)
+                try:
+                    otp_sender.send_otp(wa_id, code, otp.ttl_s)
+                except OtpDeliveryError as e:
+                    # Fail-closed: drop the challenge, tell the user honestly.
+                    otp.cancel(wa_id)
+                    st.pop("onboarding_tin", None)
+                    _save(wa_id, st)
+                    log.error("whatsapp: OTP delivery failed wa_id=%s: %s", wa_id, e)
+                    wa.send_text(wa_id, "We couldn't send the verification code "
+                                        "right now - please try again.")
+                    return True
                 wa.send_text(wa_id, "We've sent you a 6-digit verification code "
                                     f"(valid {otp.ttl_s // 60} minutes). Reply "
                                     "with the code to link your TIN.")

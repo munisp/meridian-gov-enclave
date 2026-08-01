@@ -89,6 +89,13 @@ class Settings:
     whatsapp_dedup_ttl_s: int = int(os.environ.get("WHATSAPP_DEDUP_TTL_S", str(48 * 3600)))
     whatsapp_otp_ttl_s: int = int(os.environ.get("WHATSAPP_OTP_TTL_S", "600"))
     whatsapp_otp_max_attempts: int = int(os.environ.get("WHATSAPP_OTP_MAX_ATTEMPTS", "3"))
+    # REAL onboarding clients (docs/WHATSAPP.md). Both required when
+    # PROFILE=prod with the WhatsApp channel active (fail-closed at startup);
+    # unset in dev => honest SIM fallback (SimOtpSender / SimTokenIssuer).
+    notification_url: str = os.environ.get("NOTIFICATION_URL", "")
+    otp_send_timeout_s: float = float(os.environ.get("OTP_SEND_TIMEOUT_S", "5"))
+    identity_url: str = os.environ.get("IDENTITY_URL", "")
+    identity_exchange_timeout_s: float = float(os.environ.get("IDENTITY_EXCHANGE_TIMEOUT_S", "10"))
     endpoints: dict = field(default_factory=lambda: dict(ENDPOINTS))
 
 
