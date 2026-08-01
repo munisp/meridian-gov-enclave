@@ -8,18 +8,21 @@ wa_id may use TIN-scoped tools it must bind to a TIN via an OTP challenge.
   services/wht (that service is not part of this enclave clone, so the
   algorithm is replicated here and pinned by tests).
 - OTP: 6-digit code, 10-minute TTL, 3 attempts then lockout. Delivery goes
-  through the OtpSender protocol (notification-service seam); the default
-  SimOtpSender logs the code with an honest [SIM] tag when no notification
-  service is wired.
+  through the OtpSender protocol (notification-service seam). REAL impl:
+  HttpOtpSender posts to {NOTIFICATION_URL}/v1/send (channel "sms",
+  template "wa_otp"), retries once on 5xx and fails closed with an honest
+  user-facing "couldn't send code, try again". SimOtpSender (dev fallback)
+  logs the code with an honest [SIM] tag.
 - Binding record: {wa_id, tin, consent_ref, ts} with an NDPA consent note;
   consent_ref is an opaque reference to the consent artefact.
 - Session token: on successful binding a scoped session token is minted via
   the TokenIssuer seam and attached to the AgentLoop UserContext so tool
-  calls execute user-scoped (no more empty token). The default
-  SimTokenIssuer returns a `wa-sim-*` token; PRODUCTION MUST wire a
-  KeycloakTokenIssuer that exchanges the verified binding for a real
-  Keycloak token via the identity service (token-exchange grant). The seam
-  is wired here; the exchange itself is SIM.
+  calls execute user-scoped (no more empty token). REAL impl:
+  IdentityTokenIssuer exchanges the verified binding at
+  {IDENTITY_URL}/v1/whatsapp/exchange ({wa_id, tin, consent_ref} ->
+  {access_token, ttl}). PROFILE=prod without IDENTITY_URL is fail-closed at
+  startup (gateway/main.py); dev falls back to SimTokenIssuer (`wa-sim-*`)
+  with an honest log.
 - Stores: binding / session / message-id dedup are behind small protocols
   with in-memory + Redis implementations. When REDIS_URL is unset or
   unreachable the channel falls back to in-memory with an honest log line.
@@ -32,6 +35,8 @@ import logging
 import re
 import secrets
 import time
+import urllib.error
+import urllib.request
 import uuid
 from dataclasses import dataclass, field
 from typing import Any, Optional, Protocol
@@ -137,6 +142,11 @@ class OtpSender(Protocol):
     def send_otp(self, wa_id: str, code: str, ttl_s: int) -> None: ...
 
 
+class OtpDeliveryError(RuntimeError):
+    """OTP could not be delivered by the notification service (fail-closed).
+    Surfaced to the user as "couldn't send code, try again"."""
+
+
 class SimOtpSender:
     """[SIM] OTP delivery: logs the code; no real message is sent. Use when
     no notification-service client is wired (dev/tests)."""
@@ -146,28 +156,125 @@ class SimOtpSender:
                  "(no notification service configured)", wa_id, code, ttl_s)
 
 
+def _urllib_json_transport(url: str, headers: dict[str, str], body: bytes,
+                           timeout_s: float) -> dict[str, Any]:
+    """Default POST transport: urllib, JSON body, returns decoded JSON."""
+    req = urllib.request.Request(url, data=body, headers=headers, method="POST")
+    with urllib.request.urlopen(req, timeout=timeout_s) as resp:  # nosec - env-configured host
+        raw = resp.read().decode()
+        return json.loads(raw) if raw.strip() else {}
+
+
+class HttpOtpSender:
+    """REAL OTP delivery via the platform notification service.
+
+    POST {base_url}/v1/send {"channel": "sms", "to": wa_id,
+    "template": "wa_otp", "params": {"code", "ttl_s"}}. Retries once on 5xx;
+    any other failure (4xx, timeout, network) raises OtpDeliveryError so the
+    caller can fail closed with an honest user message. Transport is
+    injectable for tests: fn(url, headers, body, timeout_s) -> dict."""
+
+    def __init__(self, base_url: str, timeout_s: float = 5.0, transport=None):
+        if not base_url:
+            raise ValueError("HttpOtpSender requires a notification-service base URL")
+        self.base_url = base_url.rstrip("/")
+        self.timeout_s = timeout_s
+        self.transport = transport or _urllib_json_transport
+
+    def send_otp(self, wa_id: str, code: str, ttl_s: int) -> None:
+        url = f"{self.base_url}/v1/send"
+        body = json.dumps({"channel": "sms", "to": wa_id,
+                           "template": "wa_otp",
+                           "params": {"code": code, "ttl_s": ttl_s}}).encode()
+        headers = {"content-type": "application/json"}
+        last: Optional[Exception] = None
+        for attempt in (1, 2):  # one retry, 5xx only
+            try:
+                self.transport(url, headers, body, self.timeout_s)
+                log.info("whatsapp: OTP delivered via notification service "
+                         "wa_id=%s attempt=%d", wa_id, attempt)
+                return
+            except urllib.error.HTTPError as e:
+                last = e
+                if 500 <= e.code < 600 and attempt == 1:
+                    log.warning("whatsapp: notification service %d on OTP send; "
+                                "retrying once", e.code)
+                    continue
+                break
+            except Exception as e:  # noqa: BLE001 - timeout/network, fail closed
+                last = e
+                break
+        raise OtpDeliveryError(
+            f"notification service could not deliver OTP for wa_id={wa_id}: "
+            f"{type(last).__name__}") from last
+
+
 # ---------------------------------------------------------------------------
 # Scoped session token (identity-service seam)
 # ---------------------------------------------------------------------------
 class TokenIssuer(Protocol):
     """Mints a scoped session token for a verified wa_id<->TIN binding.
 
-    PRODUCTION: implement KeycloakTokenIssuer which exchanges the verified
-    binding for a real Keycloak access token via the identity service
-    (token-exchange grant, audience = platform APIs, scope = the bound TIN).
-    The exchange is intentionally a seam here; the default is SIM."""
+    REAL impl: IdentityTokenIssuer exchanges the verified binding via the
+    identity service. Default (dev) is SimTokenIssuer; PROFILE=prod without
+    IDENTITY_URL is fail-closed at startup (gateway/main.py)."""
 
-    def issue(self, wa_id: str, tin: str) -> str: ...
+    def issue(self, wa_id: str, tin: str, consent_ref: str = "") -> str: ...
+
+
+class IdentityExchangeError(RuntimeError):
+    """Identity service refused/unreachable for the WhatsApp token exchange
+    (fail-closed: the binding is NOT persisted without a token)."""
 
 
 class SimTokenIssuer:
     """[SIM] token: honest prefix so it can never be confused with a real JWT."""
 
-    def issue(self, wa_id: str, tin: str) -> str:
+    def issue(self, wa_id: str, tin: str, consent_ref: str = "") -> str:
         token = f"wa-sim-{uuid.uuid4().hex}"
         log.info("[SIM] scoped session token issued for wa_id=%s tin=%s "
                  "(production: exchange via identity service for Keycloak token)",
                  wa_id, mask_tin(tin))
+        return token
+
+
+class IdentityTokenIssuer:
+    """REAL scoped token via the identity service.
+
+    POST {base_url}/v1/whatsapp/exchange {"wa_id", "tin", "consent_ref"} ->
+    {"access_token", "ttl"}. Any non-2xx, timeout or network failure raises
+    IdentityExchangeError (fail-closed: no binding is persisted). Transport
+    is injectable for tests: fn(url, headers, body, timeout_s) -> dict."""
+
+    def __init__(self, base_url: str, timeout_s: float = 10.0, transport=None):
+        if not base_url:
+            raise ValueError("IdentityTokenIssuer requires an identity-service base URL")
+        self.base_url = base_url.rstrip("/")
+        self.timeout_s = timeout_s
+        self.transport = transport or _urllib_json_transport
+
+    def issue(self, wa_id: str, tin: str, consent_ref: str = "") -> str:
+        url = f"{self.base_url}/v1/whatsapp/exchange"
+        body = json.dumps({"wa_id": wa_id, "tin": tin,
+                           "consent_ref": consent_ref}).encode()
+        headers = {"content-type": "application/json"}
+        try:
+            resp = self.transport(url, headers, body, self.timeout_s)
+        except urllib.error.HTTPError as e:
+            raise IdentityExchangeError(
+                f"identity service exchange failed wa_id={wa_id}: HTTP {e.code}"
+            ) from e
+        except Exception as e:  # noqa: BLE001 - timeout/network, fail closed
+            raise IdentityExchangeError(
+                f"identity service exchange failed wa_id={wa_id}: "
+                f"{type(e).__name__}") from e
+        token = resp.get("access_token", "")
+        if not token:
+            raise IdentityExchangeError(
+                f"identity service returned no access_token for wa_id={wa_id}")
+        log.info("whatsapp: scoped token issued via identity service wa_id=%s "
+                 "tin=%s consent_ref=%s ttl=%s", wa_id, mask_tin(tin),
+                 consent_ref, resp.get("ttl", "?"))
         return token
 
 

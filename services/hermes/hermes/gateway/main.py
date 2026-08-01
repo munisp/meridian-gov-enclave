@@ -19,9 +19,44 @@ from ..llm.ollama import OllamaAdapter
 from ..llm.rule import RuleAdapter
 from .auth import principal_from, problem
 from .prompts import system_prompt
+from .wa_onboarding import HttpOtpSender, IdentityTokenIssuer
 from .whatsapp import add_whatsapp_routes
 
 log = logging.getLogger("hermes.gateway")
+
+
+def build_onboarding_clients(s: Settings):
+    """Select REAL vs SIM onboarding clients (OTP delivery + token exchange).
+
+    REAL when NOTIFICATION_URL / IDENTITY_URL are set; SIM fallback otherwise
+    with an honest log line. PROFILE=prod is fail-closed: both URLs are
+    required or the service refuses to start (WhatsApp channel disabled)."""
+    otp_sender = token_issuer = None
+    if s.notification_url:
+        otp_sender = HttpOtpSender(s.notification_url,
+                                   timeout_s=s.otp_send_timeout_s)
+        log.info("hermes whatsapp: OTP delivery REAL via notification service "
+                 "(%s)", s.notification_url)
+    if s.identity_url:
+        token_issuer = IdentityTokenIssuer(
+            s.identity_url, timeout_s=s.identity_exchange_timeout_s)
+        log.info("hermes whatsapp: token exchange REAL via identity service "
+                 "(%s)", s.identity_url)
+    if s.profile == "prod" and (otp_sender is None or token_issuer is None):
+        missing = (["" if otp_sender else "NOTIFICATION_URL"]
+                   + ["" if token_issuer else "IDENTITY_URL"])
+        raise RuntimeError(
+            "hermes whatsapp: PROFILE=prod requires "
+            + " and ".join(m for m in missing if m)
+            + " (fail-closed: WhatsApp onboarding cannot run SIM in prod); "
+            "refusing to start")
+    if otp_sender is None:
+        log.info("hermes whatsapp: NOTIFICATION_URL unset; SIM OTP delivery "
+                 "(codes logged with [SIM] tag, nothing sent)")
+    if token_issuer is None:
+        log.info("hermes whatsapp: IDENTITY_URL unset; SIM token issuer "
+                 "(wa-sim-* tokens)")
+    return otp_sender, token_issuer
 
 
 class ChatRequest(BaseModel):
@@ -117,10 +152,11 @@ def create_app(settings: Optional[Settings] = None, whatsapp_client=None,
             tool_calls=len(result.tool_calls))
 
     # WhatsApp Business Cloud channel (fail-closed in prod when unconfigured)
+    wa_otp_sender, wa_token_issuer = build_onboarding_clients(s)
     add_whatsapp_routes(app, s, audit, memory, build_loop, client=whatsapp_client,
                         stores=whatsapp_stores, otp=whatsapp_otp,
-                        otp_sender=whatsapp_otp_sender,
-                        token_issuer=whatsapp_token_issuer)
+                        otp_sender=whatsapp_otp_sender or wa_otp_sender,
+                        token_issuer=whatsapp_token_issuer or wa_token_issuer)
 
     return app
 

@@ -54,7 +54,9 @@ def test_ussd_truncation_160():
 def test_prod_profile_disables_dev_auth():
     from hermes.config import Settings
     c = TestClient(create_app(Settings(auth_mode="dev", profile="prod",
-                                       whatsapp_app_secret="prod-secret")))
+                                       whatsapp_app_secret="prod-secret",
+                                       notification_url="http://notification:8080",
+                                       identity_url="http://identity:8080")))
     r = c.post("/v1/chat", json={"agent": "taxpayer-copilot", "message": "hi"},
                headers={"x-dev-role": "nrs.taxpayer"})
     assert r.status_code == 401  # fail-closed in prod
