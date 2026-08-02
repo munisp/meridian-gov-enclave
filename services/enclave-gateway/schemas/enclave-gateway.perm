@@ -1,0 +1,18 @@
+// Gov enclave-gateway scopes (used by meridian-gov-enclave enclave-gateway).
+// The gateway checks scopes of the form "<entity>:<id>:<permission>"
+// (flow:f1:send) and "<entity>:<permission>" (receipts:read); the permission
+// segment must exist here — guarded by schema_test.go.
+entity user {}
+
+entity flow {
+    relation operator @user
+    relation auditor @user
+    permission send = operator
+    permission read = operator + auditor
+}
+
+entity receipts {
+    relation operator @user
+    relation auditor @user
+    permission read = operator + auditor
+}
