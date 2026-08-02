@@ -51,24 +51,19 @@ def test_ussd_confirmation_prompt_mentions_pin():
     assert "PIN" in r.confirmation_request["prompt"]
 
 
-def test_runbook_gated_and_audited_after_confirm():
+def test_runbook_planned_not_executed_even_after_confirm():
+    # run_runbook is planned (no ops API exists): even a confirmed user must
+    # get an honest unavailability answer, never an execution.
     loop, ex = make_loop("ops-copilot", {"run_runbook": {"ok": True}})
     c = UserContext(sub="sre", roles=["nrs.sre"], token="tok", agent="ops-copilot")
     r = loop.run_turn(c, "restart deploy via runbook")
-    assert r.confirmation_request["tool"] == "run_runbook"
+    assert r.confirmation_request is None
+    assert not [t for t in r.tool_calls if t.status == "ok"]
+    assert "planned" in r.answer.lower() or "not available" in r.answer.lower()
     c.user_confirmed = True
     r2 = loop.run_turn(c, "restart deploy via runbook")
-    assert r2.tool_calls[0].status == "ok"
-    assert loop.audit.records[-1]["actor"] == "sre"
-
-
-def test_runbook_dry_run_default():
-    loop, ex = make_loop("ops-copilot", {"run_runbook": {"ok": True}})
-    c = UserContext(sub="sre", roles=["nrs.sre"], token="tok", agent="ops-copilot",
-                    user_confirmed=True)
-    loop.run_turn(c, "restart deploy via runbook")
-    # dry_run defaulted true by executor wrapper (SPEC D: dry-run mandatory first)
-    assert True  # validated via ToolExecutor unit below
+    assert not [t for t in r2.tool_calls if t.status == "ok"]
+    assert not ex.seen_auth_headers  # nothing ever executed
 
 
 def test_executor_runbook_allowlist():

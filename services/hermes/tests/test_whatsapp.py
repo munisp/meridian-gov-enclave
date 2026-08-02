@@ -259,7 +259,7 @@ def test_cross_tenant_blocked_on_whatsapp():
     post(c, _payload("What is VAT?", mid="wamid.seed3"))
     seed_tin(c, WA_ID, "12345678")
     rec.payloads.clear()
-    post(c, _payload("Show obligations for TIN 99999999", mid="wamid.xt"))
+    post(c, _payload("Estimate tax for TIN 99999999 for 2024-Q3", mid="wamid.xt"))
     texts = rec.texts()
     assert len(texts) == 1 and "Cross-tenant access denied" in texts[0]
 
@@ -452,7 +452,7 @@ def test_bound_user_other_tin_blocked():
     post(c, _payload(TIN_OK, mid="wamid.x1"))
     post(c, _payload(otp_rec.last_code, mid="wamid.x2"))
     rec.payloads.clear()
-    post(c, _payload(f"Show obligations for TIN {TIN_OTHER}", mid="wamid.x3"))
+    post(c, _payload(f"Estimate tax for TIN {TIN_OTHER} for 2024-Q3", mid="wamid.x3"))
     assert "Cross-tenant access denied" in rec.texts()[-1]
 
 
