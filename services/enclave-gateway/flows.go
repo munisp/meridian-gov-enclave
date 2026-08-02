@@ -97,7 +97,7 @@ func (s *Server) pipeline(w http.ResponseWriter, r *http.Request, f *Flow) {
 				"F6 (EOI exchange) is enclave-internal and not a north-south flow")
 			return
 		}
-	} else if !scopeCheck(p, f.Scope) {
+	} else if !s.scopeCheckAuthz(r, p, f.Scope) {
 		writeProblem(w, http.StatusForbidden, "Forbidden",
 			"principal lacks required scope "+f.Scope)
 		return

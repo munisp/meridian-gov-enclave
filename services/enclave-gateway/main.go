@@ -38,6 +38,7 @@ type Server struct {
 	localWorm *LocalWORMStore
 	mu        sync.Mutex
 	receipts  []*EvidenceReceipt // in-memory receipt log (admin console)
+	perm      *PermifyClient     // non-nil when PERMIFY_URL selects live authz (P0)
 }
 
 func main() {
@@ -68,8 +69,14 @@ func main() {
 		api.SetReceiptSigner(receiptSigner)
 	}
 	log.Printf("key provider: mode=%s (evidence receipt signing)", keyProv.Mode())
+	// P0: Permify centralized authz — fail-closed in non-dev AUTH_MODE
+	// without PERMIFY_URL (permify.go).
+	perm, err := permifyFromEnv(cfg)
+	if err != nil {
+		log.Fatalf("permify authz (fail closed): %v", err)
+	}
 	s := &Server{cfg: cfg, authn: newAuthenticator(cfg),
-		http: &http.Client{Timeout: 10 * time.Second}, worm: worm, localWorm: local}
+		http: &http.Client{Timeout: 10 * time.Second}, worm: worm, localWorm: local, perm: perm}
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /healthz", s.healthz)
@@ -186,7 +193,7 @@ func (s *Server) logReceipt(rc *EvidenceReceipt) {
 
 func (s *Server) handleReceipts(w http.ResponseWriter, r *http.Request) {
 	p := r.Context().Value(ctxPrincipal).(*Principal)
-	if !scopeCheck(p, "receipts:read") {
+	if !s.scopeCheckAuthz(r, p, "receipts:read") {
 		writeProblem(w, http.StatusForbidden, "Forbidden", "scope receipts:read required")
 		return
 	}
@@ -208,7 +215,7 @@ func (s *Server) handleReceipts(w http.ResponseWriter, r *http.Request) {
 // serving. Dev fallback: local feed store under <data>/feeds/.
 func (s *Server) handleF7(w http.ResponseWriter, r *http.Request) {
 	p := r.Context().Value(ctxPrincipal).(*Principal)
-	if !scopeCheck(p, "flow:f7:read") {
+	if !s.scopeCheckAuthz(r, p, "flow:f7:read") {
 		writeProblem(w, http.StatusForbidden, "Forbidden", "scope flow:f7:read required")
 		return
 	}
@@ -264,7 +271,7 @@ func (s *Server) handleF7(w http.ResponseWriter, r *http.Request) {
 // pseudonymised (pseudo_tin only) and EVERY read is logged to the read-audit log.
 func (s *Server) handleF8(w http.ResponseWriter, r *http.Request) {
 	p := r.Context().Value(ctxPrincipal).(*Principal)
-	if !scopeCheck(p, "flow:f8:read") {
+	if !s.scopeCheckAuthz(r, p, "flow:f8:read") {
 		writeProblem(w, http.StatusForbidden, "Forbidden", "scope flow:f8:read required")
 		return
 	}
