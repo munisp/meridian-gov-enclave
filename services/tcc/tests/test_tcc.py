@@ -95,10 +95,12 @@ def test_eligibility_reasons_unit():
 
 def test_sla_breach_alert():
     rec = _apply(TIN_OK, "k-sla")
-    # age the application 15 days
-    store.get(rec["application_id"])["applied_at"] = (
+    # age the application 15 days (durable store returns copies; persist back)
+    aged = store.get(rec["application_id"])
+    aged["applied_at"] = (
         dt.datetime.now(dt.timezone.utc) - dt.timedelta(days=15)
     ).isoformat().replace("+00:00", "Z")
+    store._docs.put("tcc_apps", rec["application_id"], aged)
     r = client.get("/v1/tcc/sla/breaches", headers=H)
     breaches = r.json()["breaches"]
     assert any(b["application_id"] == rec["application_id"] for b in breaches)
