@@ -117,7 +117,13 @@ class AgentLoop:
                     return result
                 tool = tool_index.get(call.name)
                 if tool is None:
-                    continue  # non-allowlisted tool: ignored
+                    # Not in the live allowlist (unknown or planned tool):
+                    # the call can never execute, so answer honestly and stop
+                    # instead of looping on it forever.
+                    result.answer = (f"Tool '{call.name}' is not available for "
+                                     "this agent (unknown or planned — no backing "
+                                     "platform endpoint); no action was performed.")
+                    return result
                 calls_made += 1
                 log = ToolCallLog(tool=tool.name, args=dict(call.args), status="ok")
                 # 2) Action-approval gate

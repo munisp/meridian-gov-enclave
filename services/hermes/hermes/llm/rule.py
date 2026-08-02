@@ -10,6 +10,7 @@ import re
 from typing import Any
 
 from .base import LLMResponse, ToolCall
+from ..agent.tools import PLANNED_TOOL_NAMES
 
 _TIN_RE = re.compile(r"TIN[:#\s]*([A-Za-z0-9-]{6,})", re.IGNORECASE)
 _CASE_RE = re.compile(r"(CASE-[A-Za-z0-9-]+)", re.IGNORECASE)
@@ -63,7 +64,8 @@ def _rules(agent: str):
             (r"kyc evidence|evidence for", "get_kyc_evidence",
              lambda t, c: {"case_id": _case(t)}),
             (r"rule pack|rules version", "get_rule_pack",
-             lambda t, c: {"version": (_VERSION_RE.search(t) or [None, "2024.1"])[1]
+             lambda t, c: {"id": "rp-vat-rates",
+                           "version": (_VERSION_RE.search(t) or [None, "2024.1"])[1]
                            if _VERSION_RE.search(t) else "2024.1"}),
             (r"assemble|attach evidence", "assemble_evidence",
              lambda t, c: {"case_id": _case(t), "refs": ["EV-1"]}),
@@ -199,9 +201,18 @@ class RuleAdapter:
         text = str(last.get("content", ""))
         tool_names = {t["function"]["name"] for t in tools} if tools else set()
         for pattern, name, argf in self.rules:
-            if re.search(pattern, text, re.IGNORECASE) and name in tool_names:
+            if not re.search(pattern, text, re.IGNORECASE):
+                continue
+            if name in tool_names:
                 return LLMResponse(tool_calls=[ToolCall(name=name, args=argf(text, ctx))],
                                    sim=True)
+            if name in PLANNED_TOOL_NAMES:
+                # Honest unavailability: the capability is planned but has no
+                # backing platform endpoint yet — never fake a tool call.
+                return LLMResponse(
+                    content=(f"That capability ('{name.replace('_', ' ')}') is planned "
+                             "but not available yet: no backing platform endpoint "
+                             "exists. I have not performed any action."), sim=True)
         return LLMResponse(content=("I can help with "
                                     f"{self.agent.replace('-', ' ')} tasks. "
                                     "Please rephrase your request."), sim=True)

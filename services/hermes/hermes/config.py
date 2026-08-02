@@ -1,9 +1,10 @@
 """Hermes configuration: env-driven settings + platform endpoint constants.
 
-Endpoint paths are the canonical APISIX /v1 surfaces from SPEC D (Hermes
-tool-use over platform APIs). Sibling repos' live surfaces are not available
-inside this enclave clone, so every base URL is env-overridable; only the
-canonical paths from the spec are pinned here.
+Endpoint paths are the REAL routes registered by the owning services in the
+sibling repos (wiring audit §3.3); tools whose SPEC D endpoint exists nowhere
+are gated as `planned` in hermes.agent.tools and do not appear here. Every
+base URL is env-overridable; defaults point at each service's real listener
+(see SERVICE_URLS) with the APISIX edge as the platform fallback.
 """
 from __future__ import annotations
 
@@ -11,38 +12,42 @@ import os
 from dataclasses import dataclass, field
 
 
-# Canonical platform endpoint paths (SPEC D). Base URLs are env-overridable.
+# Real platform endpoint paths per live tool (see hermes.agent.tools).
 ENDPOINTS: dict[str, str] = {
     # taxpayer copilot
-    "get_obligations": "/v1/taxpayers/{tin}/obligations",
-    "get_filing_calendar": "/v1/filings/calendar",
-    "estimate_tax": "/v1/rules-engine/estimate",
-    "file_nil_return": "/v1/filings",
+    "estimate_tax": "/v1/evaluate",                    # core rules-engine
+    "file_nil_return": "/v1/filings/vat",              # compliance filings (nil VAT return)
     # auditor copilot
-    "get_taxpayer_360": "/v1/taxpayer-360/{tin}",
-    "search_filings": "/v1/filings",
-    "search_payments": "/v1/payments",
-    "get_kyc_evidence": "/v1/kyc/cases/{case_id}/evidence",
-    "get_rule_pack": "/v1/rules-engine/packs/{version}",
-    "assemble_evidence": "/v1/audit-cases/{case_id}/evidence",
-    "draft_finding": "/v1/audit-cases/{case_id}/drafts",
-    # ops copilot
-    "hubble_flows": "/v1/obs/hubble/flows",
-    "kafka_lag": "/v1/obs/kafka/lag",
-    "drift_report": "/v1/obs/drift/{svc}",
-    "pod_health": "/v1/obs/k8s/health",
-    "run_runbook": "/v1/ops/runbooks",
+    "get_taxpayer_360": "/v1/taxpayer360/{tin_hash}",  # core tin-graph
+    "search_payments": "/v1/payments",                 # inclusion presumptive
+    "get_kyc_evidence": "/v1/cases/{case_id}/evidence",  # inclusion kyc-engine
+    "get_rule_pack": "/v1/packs/{id}/{version}",       # core rp-registry
     # policy copilot
-    "list_rule_packs": "/v1/rules-engine/packs",
-    "simulate": "/v1/rules-engine/sandbox/simulate",
-    "aggregate_taxpayers": "/v1/analytics/aggregate",
-    "save_scenario": "/v1/rules-engine/scenarios",
+    "list_rule_packs": "/v1/packs",                    # core rules-engine
     # onboarding assistant
-    "create_kyc_case": "/v1/kyc/cases",
-    "get_case_status": "/v1/kyc/cases/{case_id}",
-    "get_field_gaps": "/v1/kyc/cases/{case_id}/field-gaps",
+    "create_kyc_case": "/v1/cases",                    # inclusion kyc-engine
+    "get_case_status": "/v1/cases/{case_id}",          # inclusion kyc-engine
     # static/local tools (explain_term, upload_doc_hint) have no endpoint.
+    # Planned tools (get_obligations, get_filing_calendar, search_filings,
+    # assemble_evidence, draft_finding, hubble_flows, kafka_lag, drift_report,
+    # pod_health, run_runbook, simulate, aggregate_taxpayers, save_scenario,
+    # get_field_gaps) intentionally have no entry: no real route exists.
 }
+
+
+def _service_urls() -> dict[str, str]:
+    """Per-service base URLs for tool dispatch. Defaults are each service's
+    real dev listener (from its main.go/envOr or compose file); an empty
+    value falls back to the APISIX platform base (platform_base_url)."""
+    return {
+        "rules-engine": os.environ.get("HERMES_RULES_ENGINE_URL", "http://localhost:8001"),
+        "rp-registry": os.environ.get("HERMES_RP_REGISTRY_URL", "http://localhost:8002"),
+        "tin-graph": os.environ.get("HERMES_TIN_GRAPH_URL", "http://localhost:8003"),
+        "kyc-engine": os.environ.get("HERMES_KYC_URL", "http://localhost:8105"),
+        "presumptive": os.environ.get("HERMES_PRESUMPTIVE_URL", "http://localhost:8102"),
+        # filings has no documented standalone port: route via the gateway.
+        "filings": os.environ.get("HERMES_FILINGS_URL", ""),
+    }
 
 
 @dataclass(frozen=True)
@@ -59,8 +64,12 @@ class Settings:
     ollama_url: str = os.environ.get("OLLAMA_URL", "http://localhost:11434")
     ollama_model: str = os.environ.get("OLLAMA_MODEL", "qwen2.5:32b-instruct")
     ollama_model_ussd: str = os.environ.get("OLLAMA_MODEL_USSD", "qwen2.5:14b")
-    # Platform API base (APISIX gateway). Tool HTTP calls are user-token scoped.
+    # Platform API base: the APISIX edge gateway (core-platform
+    # infra/apisix/config.yaml node_listen 9080). Tool HTTP calls are
+    # user-token scoped; per-service overrides in service_urls win when set.
     platform_base_url: str = os.environ.get("HERMES_PLATFORM_BASE_URL", "http://localhost:9080")
+    # Per-service tool-dispatch base URLs (env-overridable; "" => platform base).
+    service_urls: dict = field(default_factory=_service_urls)
     # Loop hard limits (SPEC D section 0)
     max_tool_calls: int = int(os.environ.get("HERMES_MAX_TOOL_CALLS", "8"))
     tool_timeout_s: float = float(os.environ.get("HERMES_TOOL_TIMEOUT_S", "30"))

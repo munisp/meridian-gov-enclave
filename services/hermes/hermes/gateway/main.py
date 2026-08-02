@@ -100,7 +100,8 @@ def create_app(settings: Optional[Settings] = None, whatsapp_client=None,
             adapter = OllamaAdapter(s.ollama_url, model)
         else:
             adapter = RuleAdapter(agent)
-        executor = ToolExecutor(s.platform_base_url, s.tool_timeout_s)
+        executor = ToolExecutor(s.platform_base_url, s.tool_timeout_s,
+                                service_urls=s.service_urls)
         return AgentLoop(adapter, executor, audit, memory,
                          max_tool_calls=s.max_tool_calls,
                          max_answer_tokens=s.max_answer_tokens)
