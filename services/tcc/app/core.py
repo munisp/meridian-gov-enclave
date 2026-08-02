@@ -17,6 +17,8 @@ from __future__ import annotations
 
 import datetime as dt
 
+from . import store
+
 
 class TccError(ValueError):
     pass
@@ -46,33 +48,36 @@ def evaluate_eligibility(years: list[dict], disclosure_years: int) -> tuple[bool
 
 
 class TccStore:
-    def __init__(self) -> None:
-        self._apps: dict[str, dict] = {}
-        self._certs: dict[str, dict] = {}
-        self._by_idem: dict[str, str] = {}
+    """Durable via app.store.DocStore (Postgres in prod, in-memory dev
+    fallback) — certificates + SLA state survive restarts (audit P0)."""
+
+    def __init__(self, docs: "store.DocStore | None" = None) -> None:
+        self._docs = docs if docs is not None else store.DocStore()
 
     def _add(self, rec: dict) -> dict:
-        self._apps[rec["application_id"]] = rec
+        self._docs.put("tcc_apps", rec["application_id"], rec)
         return rec
 
     def apply(self, tin: str, now: str, idempotency_key: str,
               application_id: str) -> tuple[dict, bool]:
-        if idempotency_key in self._by_idem:
-            return self._apps[self._by_idem[idempotency_key]], False
+        prior = self._docs.get("tcc_idem", idempotency_key)
+        if prior is not None:
+            return self._docs.get("tcc_apps", prior["application_id"]), False
         rec = {"application_id": application_id, "tin": tin,
                "applied_at": now, "status": "pending",
                "decided_at": None, "sla_breached": False,
                "denial_reasons": [], "certificate_id": None}
-        self._by_idem[idempotency_key] = application_id
+        self._docs.put("tcc_idem", idempotency_key,
+                       {"application_id": application_id})
         return self._add(rec), True
 
     def get(self, application_id: str) -> dict | None:
-        return self._apps.get(application_id)
+        return self._docs.get("tcc_apps", application_id)
 
     def decide(self, application_id: str, *, now: str, sla_days: int,
                eligible: bool, reasons: list[str], certificate_id: str | None,
                ledger_mode: str) -> dict:
-        rec = self._apps.get(application_id)
+        rec = self._docs.get("tcc_apps", application_id)
         if rec is None:
             raise TccError("unknown application")
         if rec["status"] != "pending":
@@ -87,17 +92,18 @@ class TccStore:
         else:
             rec["status"] = "denied"
             rec["denial_reasons"] = reasons
+        self._docs.put("tcc_apps", application_id, rec)
         return rec
 
     def register_cert(self, cert: dict) -> None:
-        self._certs[cert["certificate_id"]] = cert
+        self._docs.put("tcc_certs", cert["certificate_id"], cert)
 
     def cert(self, certificate_id: str) -> dict | None:
-        return self._certs.get(certificate_id)
+        return self._docs.get("tcc_certs", certificate_id)
 
     def sla_breaches(self, now: str, sla_days: int) -> list[dict]:
         out = []
-        for rec in self._apps.values():
+        for rec in self._docs.scan("tcc_apps"):
             if rec["status"] != "pending":
                 continue
             age = _parse(now) - _parse(rec["applied_at"])
