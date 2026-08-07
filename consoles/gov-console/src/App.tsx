@@ -167,7 +167,7 @@ export default function App() {
           <Landmark aria-hidden="true" className="h-4 w-4" />
           Meridian
         </div>
-        <div className="mb-6 text-lg font-bold text-white">Gov Console</div>
+        <div className="mb-6 text-lg font-bold text-white">Meridian Gov Console</div>
         <nav className="flex-1 space-y-1" aria-label="Primary">
           {NAV.map((item, i) =>
             'section' in item && item.section ? (
