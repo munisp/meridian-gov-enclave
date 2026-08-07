@@ -72,7 +72,10 @@ jobs:
         run: |
           cd services/hermes
           pip install -r requirements.txt
-          python -m pytest tests -q
+          # tests/test_wa_clients.py uses a relative import (from .test_whatsapp
+          # import ...) which the default prepend import mode fails to collect;
+          # importlib mode collects cleanly (reproduced: 118 passed).
+          python -m pytest tests -q --import-mode=importlib
           python -m hermes.eval.runner
 
   gov-console:
