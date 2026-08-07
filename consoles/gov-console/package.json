@@ -1,5 +1,6 @@
 {
-  "name": "gov-console",
+  "name": "meridian-gov-console",
+  "description": "Meridian Gov Console — Government Oversight",
   "private": true,
   "version": "0.1.0",
   "type": "module",
