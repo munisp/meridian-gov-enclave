@@ -54,10 +54,12 @@ _TIN_SCOPED_RE = re.compile(
     r"file (a )?nil|nil return|calendar|due date|deadline", re.IGNORECASE)
 
 ONBOARDING_PROMPT = (
-    "To use taxpayer services here, link your TIN to this WhatsApp number. "
-    "Reply with your TIN (format NNNNNNNN-NNNN). We'll verify it with a "
-    "one-time code. Your consent is recorded per NDPA; send UNLINK anytime "
-    "to remove the link.")
+    "Nigeria Revenue Service (NRS) taxpayer channel. To check your "
+    "outstanding liabilities, filing deadlines or e-invoice (IRN) status "
+    "here, link your TIN (Tax Identification Number) to this WhatsApp "
+    "number. Reply with your TIN (format NNNNNNNN-NNNN). We'll verify it "
+    "with a one-time code. Your consent is recorded per NDPA; send UNLINK "
+    "anytime to remove the link.")
 
 
 # ---------------------------------------------------------------------------
@@ -272,8 +274,9 @@ def add_whatsapp_routes(app: FastAPI, s: Settings, audit: AuditChain,
                 st["tin"], st["token"] = "", ""
                 _save(wa_id, st)
                 wa.send_text(wa_id, "Your TIN link has been removed and your "
-                                    "consent withdrawn. TIN-scoped services are "
-                                    "now disabled for this number.")
+                                    "NDPA consent withdrawn. TIN-scoped NRS "
+                                    "services (liabilities, filings, e-invoice "
+                                    "status) are now disabled for this number.")
             else:
                 wa.send_text(wa_id, "No TIN is linked to this WhatsApp number.")
             return True
@@ -325,10 +328,12 @@ def add_whatsapp_routes(app: FastAPI, s: Settings, audit: AuditChain,
                     log.info("whatsapp: TIN bound wa_id=%s tin=%s consent_ref=%s",
                              wa_id, mask_tin(binding.tin), binding.consent_ref)
                     wa.send_text(wa_id, f"TIN {mask_tin(binding.tin)} is now linked "
-                                        "to this number. You can ask about your "
-                                        "obligations, estimates and filings. "
-                                        "Send STATUS to view the link or UNLINK "
-                                        "to remove it.")
+                                        "to this number. You can now ask about "
+                                        "your outstanding liabilities, upcoming "
+                                        "filing deadlines (VAT/WHT 21st, PAYE "
+                                        "10th), e-invoice (IRN) status and "
+                                        "refunds. Send STATUS to view the link "
+                                        "or UNLINK to remove it.")
                 elif outcome == "wrong":
                     wa.send_text(wa_id, "That code is incorrect. Please try again "
                                         f"({otp.max_attempts} attempts allowed).")
@@ -349,9 +354,10 @@ def add_whatsapp_routes(app: FastAPI, s: Settings, audit: AuditChain,
             # TIN submission -> validate + issue OTP.
             if TIN_RE.match(cmd):
                 if not valid_tin(cmd):
-                    wa.send_text(wa_id, "That TIN is not valid (format "
+                    wa.send_text(wa_id, "That TIN is not valid (NRS format "
                                         "NNNNNNNN-NNNN with check digit). "
-                                        "Please check and resend.")
+                                        "Please check the number on your TIN "
+                                        "certificate and resend.")
                     return True
                 code = otp.start(wa_id, cmd)
                 st["onboarding_tin"] = cmd
@@ -367,7 +373,8 @@ def add_whatsapp_routes(app: FastAPI, s: Settings, audit: AuditChain,
                     wa.send_text(wa_id, "We couldn't send the verification code "
                                         "right now - please try again.")
                     return True
-                wa.send_text(wa_id, "We've sent you a 6-digit verification code "
+                wa.send_text(wa_id, "NRS TIN verification: we've sent you a "
+                                    "6-digit verification code "
                                     f"(valid {otp.ttl_s // 60} minutes). Reply "
                                     "with the code to link your TIN.")
                 return True
