@@ -31,15 +31,15 @@ const (
 )
 
 type Server struct {
-	cfg      Config
-	authn    *authx.Authenticator
-	cases    *CaseStore
-	ledger   LedgerClient
-	worm     WORMStore
-	gate     GateClient
-	localGate *LocalGateClient
+	cfg        Config
+	authn      *authx.Authenticator
+	cases      *CaseStore
+	ledger     LedgerClient
+	worm       WORMStore
+	gate       GateClient
+	localGate  *LocalGateClient
 	depositBps int
-	emitter  eventx.Emitter
+	emitter    eventx.Emitter
 }
 
 func main() {
@@ -373,7 +373,7 @@ func (s *Server) listPacks(w http.ResponseWriter, _ *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{"packs": []string{
 		"rp-procedure-ombud@1.0.0", "rp-procedure-tat@1.0.0",
 		"rp-ntaa-penalties@1.0.0", "rp-deposit-20pct@1.0.0"},
-		"source": "embedded fallback packs; production pins from rp-registry",
+		"source":           "embedded fallback packs; production pins from rp-registry",
 		"deposit_rate_bps": s.depositBps,
 	})
 }

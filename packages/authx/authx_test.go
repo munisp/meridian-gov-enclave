@@ -74,7 +74,7 @@ func TestKeycloakRS256JWKS(t *testing.T) {
 	}
 	good := sign(map[string]any{
 		"sub": "svc-jrb", "iss": issuer, "aud": "meridian-services",
-		"exp": time.Now().Add(time.Hour).Unix(),
+		"exp":          time.Now().Add(time.Hour).Unix(),
 		"realm_access": map[string]any{"roles": []string{"operator"}},
 	})
 	req := httptest.NewRequest("GET", "/", nil)

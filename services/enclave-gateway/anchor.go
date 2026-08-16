@@ -24,14 +24,14 @@ import (
 
 // AnchorRecord is one sealed daily anchor.
 type AnchorRecord struct {
-	Date         string `json:"date"`          // UTC day
-	MerkleRoot   string `json:"merkle_root"`   // over the day's manifest entry hashes
-	Entries      int    `json:"entries"`       // manifest entries covered
-	ChainTip     string `json:"chain_tip"`     // last manifest_hash covered
-	PrevAnchor   string `json:"prev_anchor"`   // hash of previous anchor record (chain)
-	ExternalURI  string `json:"external_uri"`  // where the anchor was recorded
-	Seal         string `json:"seal"`          // HMAC-SHA256 over canonical record
-	CreatedAt    string `json:"created_at"`
+	Date        string `json:"date"`         // UTC day
+	MerkleRoot  string `json:"merkle_root"`  // over the day's manifest entry hashes
+	Entries     int    `json:"entries"`      // manifest entries covered
+	ChainTip    string `json:"chain_tip"`    // last manifest_hash covered
+	PrevAnchor  string `json:"prev_anchor"`  // hash of previous anchor record (chain)
+	ExternalURI string `json:"external_uri"` // where the anchor was recorded
+	Seal        string `json:"seal"`         // HMAC-SHA256 over canonical record
+	CreatedAt   string `json:"created_at"`
 }
 
 func anchorKey() string {
