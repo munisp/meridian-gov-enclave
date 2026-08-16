@@ -22,9 +22,9 @@ import (
 // consumption, residual 70% on equality + derivation. Loaded from the
 // rp-attribution-formula pack (embedded fallback keeps dev standalone).
 type AttributionFormula struct {
-	PackRef                       string
-	PlaceOfConsumptionWeightBps   int
-	ResidualBps                   int
+	PackRef                     string
+	PlaceOfConsumptionWeightBps int
+	ResidualBps                 int
 }
 
 func LoadAttributionFormula(packsDir string) *AttributionFormula {
@@ -75,22 +75,22 @@ type StateConsumptionInput struct {
 
 // FeedState is one state's attributed VAT revenue row.
 type FeedState struct {
-	StateCode               string `json:"state_code"`
-	ConsumptionPortionKobo  int64  `json:"consumption_portion_kobo"`
-	EqualityPortionKobo     int64  `json:"equality_portion_kobo"`
-	DerivationPortionKobo   int64  `json:"derivation_portion_kobo"`
-	TotalKobo               int64  `json:"total_kobo"`
+	StateCode              string `json:"state_code"`
+	ConsumptionPortionKobo int64  `json:"consumption_portion_kobo"`
+	EqualityPortionKobo    int64  `json:"equality_portion_kobo"`
+	DerivationPortionKobo  int64  `json:"derivation_portion_kobo"`
+	TotalKobo              int64  `json:"total_kobo"`
 }
 
 // AttributionFeed is the NTAA attribution feed for a period (signed output).
 type AttributionFeed struct {
-	FeedID    string               `json:"feed_id"`
-	Period    string               `json:"period"`
-	PoolKobo  int64                `json:"pool_kobo"`
-	Formula   map[string]any       `json:"formula"`
-	States    []FeedState          `json:"states"`
-	BuiltAt   string               `json:"built_at"`
-	PackRef   string               `json:"pack_ref"`
+	FeedID   string         `json:"feed_id"`
+	Period   string         `json:"period"`
+	PoolKobo int64          `json:"pool_kobo"`
+	Formula  map[string]any `json:"formula"`
+	States   []FeedState    `json:"states"`
+	BuiltAt  string         `json:"built_at"`
+	PackRef  string         `json:"pack_ref"`
 }
 
 // BuildAttributionFeed computes the feed. Consumption portion = 30% of pool
@@ -226,7 +226,7 @@ func NewFeedSigner(dataRoot string) (*FeedSigner, error) {
 // SignedFeedDoc is the signed feed envelope served via gateway F7.
 type SignedFeedDoc struct {
 	Feed      json.RawMessage `json:"feed"`
-	Signature string          `json:"signature"` // hex ed25519 over feed bytes
+	Signature string          `json:"signature"`  // hex ed25519 over feed bytes
 	PublicKey string          `json:"public_key"` // hex ed25519 public key
 }
 

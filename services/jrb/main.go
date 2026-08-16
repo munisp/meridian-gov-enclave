@@ -28,17 +28,17 @@ type ctxKey string
 const ctxPrincipal ctxKey = "principal"
 
 type Server struct {
-	cfg       Config
-	authn     *authx.Authenticator
-	auth      *AuthorityStore
-	eoi       *EOIStore
-	adapters  *AdapterRegistry
-	formula   *AttributionFormula
-	signer    *FeedSigner
-	runner    *WorkflowRunner
-	gateway   *GatewayClient
-	emitter   eventx.Emitter
-	http      *http.Client
+	cfg      Config
+	authn    *authx.Authenticator
+	auth     *AuthorityStore
+	eoi      *EOIStore
+	adapters *AdapterRegistry
+	formula  *AttributionFormula
+	signer   *FeedSigner
+	runner   *WorkflowRunner
+	gateway  *GatewayClient
+	emitter  eventx.Emitter
+	http     *http.Client
 }
 
 func main() {

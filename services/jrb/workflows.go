@@ -46,8 +46,8 @@ func (r *WorkflowRunner) Execute(name string, steps []struct {
 	r.mu.Lock()
 	r.seq++
 	run := &WorkflowRun{
-		RunID:     fmt.Sprintf("run-%s-%04d", time.Now().UTC().Format("20060102"), r.seq),
-		Workflow:  name, Status: "running",
+		RunID:    fmt.Sprintf("run-%s-%04d", time.Now().UTC().Format("20060102"), r.seq),
+		Workflow: name, Status: "running",
 		StartedAt: time.Now().UTC().Format(time.RFC3339),
 	}
 	r.runs = append([]*WorkflowRun{run}, r.runs...)

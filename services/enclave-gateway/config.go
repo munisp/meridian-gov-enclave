@@ -54,7 +54,7 @@ func loadConfig() Config {
 		F5ConsumerURL:     os.Getenv("F5_CONSUMER_URL"),
 		JRBURL:            os.Getenv("JRB_URL"),
 		WHTReconURL:       os.Getenv("WHT_RECON_URL"),
-			InternalFlowToken: getenv("INTERNAL_FLOW_TOKEN", ""),
+		InternalFlowToken: getenv("INTERNAL_FLOW_TOKEN", ""),
 		TLSCertFile:       os.Getenv("TLS_CERT_FILE"),
 		TLSKeyFile:        os.Getenv("TLS_KEY_FILE"),
 		MTLSCAFile:        os.Getenv("GATEWAY_MTLS_CA_FILE"),

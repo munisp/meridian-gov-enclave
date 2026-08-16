@@ -30,11 +30,11 @@ var statutoryBases = map[string]bool{
 // agencyAllowlist is the data-minimisation policy: which pseudonymised
 // fields each agency may receive.
 var agencyAllowlist = map[string][]string{
-	"firs":   {"tin_hash", "state", "band", "amount_kobo", "period"},
-	"jtb":    {"tin_hash", "state", "period"},
-	"cbn":    {"amount_kobo", "period", "band"},
-	"stats":  {"state", "band"}, // aggregate-only agency
-	"npc":    {"state"},
+	"firs":  {"tin_hash", "state", "band", "amount_kobo", "period"},
+	"jtb":   {"tin_hash", "state", "period"},
+	"cbn":   {"amount_kobo", "period", "band"},
+	"stats": {"state", "band"}, // aggregate-only agency
+	"npc":   {"state"},
 }
 
 const sharingK = 5 // k-anonymity floor (matches analytics disclosure pack)
@@ -52,10 +52,10 @@ type ConsentReceipt struct {
 
 // DiscloseRequest asks the gateway to share subject records with an agency.
 type DiscloseRequest struct {
-	Agency         string   `json:"agency"`
-	Purpose        string   `json:"purpose"`
-	ConsentReceipt string   `json:"consent_receipt,omitempty"`
-	StatutoryBasis string   `json:"statutory_basis,omitempty"`
+	Agency         string           `json:"agency"`
+	Purpose        string           `json:"purpose"`
+	ConsentReceipt string           `json:"consent_receipt,omitempty"`
+	StatutoryBasis string           `json:"statutory_basis,omitempty"`
 	Subjects       []map[string]any `json:"subjects"` // candidate records
 }
 

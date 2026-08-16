@@ -120,10 +120,10 @@ func (c *CoreLedgerClient) Balance(accountID string) (int64, error) {
 // --- dev in-memory fallback (TigerBeetle semantics) -------------------------
 
 type memTransfer struct {
-	id       string
-	amount   int64
-	pending  bool
-	caseID   string
+	id      string
+	amount  int64
+	pending bool
+	caseID  string
 }
 
 type InMemLedgerClient struct {
