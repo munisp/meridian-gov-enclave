@@ -21,21 +21,21 @@ var errNotFound = fmt.Errorf("not found")
 
 // Case is an ombud appeal case.
 type Case struct {
-	ID                 string   `json:"id"`
-	AppellantPseudoTIN string   `json:"appellant_pseudo_tin"`
-	Authority          string   `json:"authority"` // e.g. NRS, NG-LA
-	TaxType            string   `json:"tax_type"`
-	DisputedAmountKobo int64    `json:"disputed_amount_kobo"`
-	Grounds            string   `json:"grounds"`
-	State              string   `json:"state"`
-	CreatedAt          string   `json:"created_at"`
-	UpdatedAt          string   `json:"updated_at"`
-	AckDeadline        string   `json:"ack_deadline"`
-	DecideDeadline     string   `json:"decide_deadline"`
-	Deposit            *DepositHold `json:"deposit,omitempty"`
-	Decision           string   `json:"decision,omitempty"`
-	Outcome            string   `json:"outcome,omitempty"` // appellant_win | revenue_win | settled
-	Documents          []CaseDoc `json:"documents,omitempty"`
+	ID                 string         `json:"id"`
+	AppellantPseudoTIN string         `json:"appellant_pseudo_tin"`
+	Authority          string         `json:"authority"` // e.g. NRS, NG-LA
+	TaxType            string         `json:"tax_type"`
+	DisputedAmountKobo int64          `json:"disputed_amount_kobo"`
+	Grounds            string         `json:"grounds"`
+	State              string         `json:"state"`
+	CreatedAt          string         `json:"created_at"`
+	UpdatedAt          string         `json:"updated_at"`
+	AckDeadline        string         `json:"ack_deadline"`
+	DecideDeadline     string         `json:"decide_deadline"`
+	Deposit            *DepositHold   `json:"deposit,omitempty"`
+	Decision           string         `json:"decision,omitempty"`
+	Outcome            string         `json:"outcome,omitempty"` // appellant_win | revenue_win | settled
+	Documents          []CaseDoc      `json:"documents,omitempty"`
 	History            []HistoryEntry `json:"history"`
 }
 
