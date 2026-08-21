@@ -25,5 +25,30 @@ class Settings:
         return self.auth_mode == "keycloak"
 
 
+_DEV_SECRET_DEFAULT = "meridian-dev-secret"
+
+
+def _refuse_insecure_prod(s: Settings) -> None:
+    """A1-10: prod refuses to boot on the default/missing dev JWT secret or
+    AUTH_MODE=dev — both leave HS256/X-Dev-Role auth fully forgeable."""
+    # NOTE: dataclass field defaults are frozen at import time; read env
+    # directly so the gate honours the live process environment.
+    auth_mode = os.environ.get("AUTH_MODE", "dev")
+    profile = os.environ.get("PROFILE", "prod" if auth_mode == "keycloak" else "dev")
+    if profile != "prod":
+        return
+    if auth_mode == "dev":
+        raise RuntimeError(
+            "receipts: PROFILE=prod refuses AUTH_MODE=dev (HS256 dev secret + "
+            "X-Dev-Role are forgeable); configure AUTH_MODE=keycloak")
+    jwt_secret = os.environ.get("MERIDIAN_DEV_JWT_SECRET", _DEV_SECRET_DEFAULT)
+    if not jwt_secret or jwt_secret == _DEV_SECRET_DEFAULT:
+        raise RuntimeError(
+            "receipts: PROFILE=prod refuses the default/missing MERIDIAN_DEV_JWT_SECRET; "
+            "set a strong secret explicitly (fail-closed)")
+
+
 def get_settings() -> Settings:
-    return Settings()
+    s = Settings()
+    _refuse_insecure_prod(s)
+    return s

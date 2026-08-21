@@ -40,15 +40,35 @@ def _jwks():
     return _jwks_client
 
 
+def validate_auth_config(auth_mode: str, profile: str) -> None:
+    """A1-08: fail-closed audience requirement, mirroring the compliance
+    authx fix (meridian-compliance-suite PR #29): in PROFILE=prod with
+    AUTH_MODE=keycloak, KEYCLOAK_AUDIENCE is mandatory — otherwise any token
+    minted for ANY client of the realm is accepted (audience confusion).
+    Refuse to boot rather than serve unverified auth."""
+    if auth_mode == "keycloak" and profile == "prod" and not os.environ.get("KEYCLOAK_AUDIENCE"):
+        raise RuntimeError(
+            "hermes auth: PROFILE=prod + AUTH_MODE=keycloak requires "
+            "KEYCLOAK_AUDIENCE (fail-closed: audience confusion otherwise); "
+            "refusing to start"
+        )
+
+
 def decode_rs256(token: str) -> dict[str, Any] | None:
     client = _jwks()
     if client is None:
         return None  # fail-closed
+    audience = os.environ.get("KEYCLOAK_AUDIENCE", "")
+    if os.environ.get("PROFILE") == "prod" and not audience:
+        # A1-08 defense-in-depth: never run prod keycloak without audience
+        # pinning even if validate_auth_config() was bypassed.
+        log.warning("hermes auth=keycloak FAIL-CLOSED: PROFILE=prod but "
+                    "KEYCLOAK_AUDIENCE unset; Bearer rejected")
+        return None
     try:
         import jwt
         key = client.get_signing_key_from_jwt(token).key
         kwargs: dict[str, Any] = {"algorithms": ["RS256"]}
-        audience = os.environ.get("KEYCLOAK_AUDIENCE", "")
         issuer = os.environ.get("KEYCLOAK_ISSUER", "")
         if audience:
             kwargs["audience"] = audience

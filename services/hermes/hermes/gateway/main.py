@@ -90,6 +90,10 @@ def create_app(settings: Optional[Settings] = None, whatsapp_client=None,
                whatsapp_stores=None, whatsapp_otp=None,
                whatsapp_otp_sender=None, whatsapp_token_issuer=None) -> FastAPI:
     s = settings or get_settings()
+    # A1-08: prod keycloak mode without KEYCLOAK_AUDIENCE refuses to boot.
+    from .auth import validate_auth_config
+
+    validate_auth_config(s.auth_mode, s.profile)
     app = FastAPI(title="hermes", version=s.version)
     audit = AuditChain(build_sink(s.kafka_bootstrap, s.audit_topic, s.audit_jsonl_path))
     memory = build_memory(s.redis_url, s.memory_ttl_s)
