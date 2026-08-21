@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"fmt"
+	"hash/fnv"
 	"net/http"
 	"sync"
 	"time"
@@ -20,7 +21,24 @@ const (
 
 	nsDepositPool = 9001 // namespace: ombud deposit pool (revenue-side)
 	nsAppellant   = 9002 // namespace: appellant deposit accounts
+	nsDepositHold = 9003 // namespace: deterministic deposit-hold transfer ids
+
+	// DepositHoldTTLSeconds bounds how long an appeal-deposit hold can stay
+	// pending before the core ledger's pending-expiry sweeper voids it
+	// (FF-8: previously holds had no timeout and abandoned holds never
+	// expired). 90 days covers the statutory appeal window with headroom.
+	DepositHoldTTLSeconds = 90 * 24 * 3600
 )
+
+// depositHoldID derives the deterministic hold transfer id for a case
+// (FF-8): retries of Hold for the same case replay the SAME transfer id, so
+// the core ledger dedups them (Exists with identical attributes) instead of
+// double-holding the appellant's funds.
+func depositHoldID(caseID string) string {
+	h := fnv.New64a()
+	_, _ = h.Write([]byte(caseID))
+	return fmt.Sprintf("%016x%016x", nsDepositHold, h.Sum64())
+}
 
 // AccountID builds a 128-bit account id as (hi:lo) hex pair strings.
 func AccountID(namespace, serial uint64) string {
@@ -82,10 +100,14 @@ func (c *CoreLedgerClient) Hold(caseID string, serial uint64, amountKobo int64) 
 		TransferID string `json:"transfer_id"`
 	}
 	err := c.post("/v1/transfers/pending", map[string]any{
+		"id": depositHoldID(caseID), // deterministic id = idempotency key (FF-8)
 		"ledger": LedgerDisputeDeposits, "code": CodeHold,
 		"debit_account_id":  AccountID(nsAppellant, serial),
 		"credit_account_id": AccountID(nsDepositPool, serial),
-		"amount":            amountKobo, "user_data": caseID,
+		// the ledger API field is amount_kobo; "amount" was silently dropped
+		// (zero-amount holds) — fixed alongside FF-2.
+		"amount_kobo": amountKobo, "user_data": caseID,
+		"timeout_seconds": DepositHoldTTLSeconds, // hold TTL (FF-8)
 	}, &out)
 	if err != nil {
 		return nil, err
@@ -95,11 +117,19 @@ func (c *CoreLedgerClient) Hold(caseID string, serial uint64, amountKobo int64) 
 }
 
 func (c *CoreLedgerClient) Release(holdID string) error {
-	return c.post("/v1/transfers/"+holdID+"/void", map[string]any{"code": CodeRelease}, nil)
+	// FF-2/R6-c: a void MUST reuse the originating pending transfer's code
+	// (code=6 hold). Sending no code lets the ledger reuse it; a mismatched
+	// non-zero code is rejected by the real TigerBeetle cluster.
+	return c.post("/v1/transfers/"+holdID+"/void", map[string]any{}, nil)
 }
 
 func (c *CoreLedgerClient) Settle(holdID string) error {
-	return c.post("/v1/transfers/"+holdID+"/post", map[string]any{"code": CodeSettle}, nil)
+	// FF-2/R6-c: a post MUST reuse the originating pending transfer's code.
+	// Previously this sent code=5 (CodeSettle) against a code=6 hold, which
+	// the real ledger rejects (PENDING_TRANSFER_HAS_DIFFERENT_CODE) — every
+	// deposit settle failed in LEDGER_URL mode while the dev in-mem client
+	// (which ignored codes) masked it.
+	return c.post("/v1/transfers/"+holdID+"/post", map[string]any{}, nil)
 }
 
 func (c *CoreLedgerClient) Balance(accountID string) (int64, error) {
@@ -120,10 +150,11 @@ func (c *CoreLedgerClient) Balance(accountID string) (int64, error) {
 // --- dev in-memory fallback (TigerBeetle semantics) -------------------------
 
 type memTransfer struct {
-	id      string
-	amount  int64
-	pending bool
-	caseID  string
+	id        string
+	amount    int64
+	pending   bool
+	caseID    string
+	expiresAt time.Time // zero = no expiry
 }
 
 type InMemLedgerClient struct {
@@ -146,18 +177,48 @@ func (c *InMemLedgerClient) Hold(caseID string, serial uint64, amountKobo int64)
 	}
 	c.mu.Lock()
 	defer c.mu.Unlock()
+	c.sweepExpiredLocked(time.Now())
+	// FF-8 idempotency: the case id is the idempotency key — a retry for a
+	// case that already has a live (still held) hold replays that hold
+	// instead of double-holding the appellant's funds. A mismatched amount
+	// for the same key is rejected, mirroring the core ledger's
+	// exists_with_different_attributes.
+	for _, h := range c.holds {
+		if h.CaseID == caseID && h.Status == "held" {
+			if h.AmountKobo != amountKobo {
+				return nil, fmt.Errorf("hold for case %s already exists with amount %d", caseID, h.AmountKobo)
+			}
+			return h, nil
+		}
+	}
 	c.seq++
 	id := fmt.Sprintf("tb-hold-%06d", c.seq)
-	c.transfers[id] = &memTransfer{id: id, amount: amountKobo, pending: true, caseID: caseID}
+	c.transfers[id] = &memTransfer{id: id, amount: amountKobo, pending: true, caseID: caseID,
+		expiresAt: time.Now().Add(time.Duration(DepositHoldTTLSeconds) * time.Second)}
 	h := &DepositHold{HoldID: id, CaseID: caseID, AmountKobo: amountKobo, Status: "held",
 		CreatedAt: time.Now().UTC().Format(time.RFC3339), Mode: c.Mode()}
 	c.holds[id] = h
 	return h, nil
 }
 
+// sweepExpiredLocked voids pending holds past their TTL (FF-8). It runs
+// lazily on every Hold/Release/Settle; the core ledger does this on a timer
+// via its pending-expiry sweeper.
+func (c *InMemLedgerClient) sweepExpiredLocked(now time.Time) {
+	for id, t := range c.transfers {
+		if t.pending && !t.expiresAt.IsZero() && !now.Before(t.expiresAt) {
+			t.pending = false
+			if h, ok := c.holds[id]; ok && h.Status == "held" {
+				h.Status = "released"
+			}
+		}
+	}
+}
+
 func (c *InMemLedgerClient) Release(holdID string) error {
 	c.mu.Lock()
 	defer c.mu.Unlock()
+	c.sweepExpiredLocked(time.Now())
 	t, ok := c.transfers[holdID]
 	if !ok || !t.pending {
 		return fmt.Errorf("no pending hold %s", holdID)
@@ -170,6 +231,7 @@ func (c *InMemLedgerClient) Release(holdID string) error {
 func (c *InMemLedgerClient) Settle(holdID string) error {
 	c.mu.Lock()
 	defer c.mu.Unlock()
+	c.sweepExpiredLocked(time.Now())
 	t, ok := c.transfers[holdID]
 	if !ok || !t.pending {
 		return fmt.Errorf("no pending hold %s", holdID)
