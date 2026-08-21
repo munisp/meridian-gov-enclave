@@ -19,6 +19,7 @@ import (
 
 	"github.com/munisp/meridian-gov-enclave/packages/authx"
 	"github.com/munisp/meridian-gov-enclave/packages/eventx"
+	"github.com/munisp/meridian-gov-enclave/packages/httpx"
 	"github.com/munisp/meridian-gov-enclave/packages/keyx/provider"
 	"github.com/munisp/meridian-gov-enclave/packages/storex"
 )
@@ -103,7 +104,7 @@ func main() {
 	mux.HandleFunc("GET /v1/workflows/runs", s.withAuth(s.listRuns))
 
 	log.Printf("jrb %s listening on :%s (gateway=%q)", cfg.Version, cfg.Port, cfg.EnclaveGatewayURL)
-	log.Fatal(http.ListenAndServe(":"+cfg.Port, mux))
+	log.Fatal(httpx.ListenAndServe(":"+cfg.Port, mux))
 }
 
 func (s *Server) healthz(w http.ResponseWriter, _ *http.Request) {

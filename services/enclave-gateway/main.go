@@ -20,6 +20,7 @@ import (
 	"time"
 
 	"github.com/munisp/meridian-gov-enclave/packages/authx"
+	"github.com/munisp/meridian-gov-enclave/packages/httpx"
 	"github.com/munisp/meridian-gov-enclave/packages/keyx/provider"
 )
 
@@ -110,15 +111,16 @@ func main() {
 	if err != nil {
 		log.Fatalf("tls: %v", err)
 	}
-	srv := &http.Server{Addr: addr, Handler: handler, TLSConfig: tlsCfg}
+	srv := httpx.NewServer(addr, handler)
+	srv.TLSConfig = tlsCfg
 	if tlsCfg != nil {
 		log.Printf("enclave-gateway %s listening on %s TLS (worm=%s auth=%s mtls=%v)",
 			cfg.Version, addr, worm.Mode(), cfg.AuthMode, cfg.RequireClientCert)
-		log.Fatal(srv.ListenAndServeTLS("", ""))
+		log.Fatal(httpx.ServeTLS(srv, "", ""))
 	}
 	log.Printf("enclave-gateway %s listening on %s (worm=%s auth=%s)",
 		cfg.Version, addr, worm.Mode(), cfg.AuthMode)
-	log.Fatal(srv.ListenAndServe())
+	log.Fatal(httpx.Serve(srv))
 }
 
 func (s *Server) healthz(w http.ResponseWriter, _ *http.Request) {

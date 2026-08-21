@@ -16,6 +16,7 @@ import (
 
 	"github.com/munisp/meridian-gov-enclave/packages/authx"
 	"github.com/munisp/meridian-gov-enclave/packages/eventx"
+	"github.com/munisp/meridian-gov-enclave/packages/httpx"
 	"github.com/munisp/meridian-gov-enclave/packages/storex"
 )
 
@@ -88,7 +89,7 @@ func main() {
 
 	log.Printf("ombud %s listening on :%s (ledger=%s worm=%s gate=%s)",
 		cfg.Version, cfg.Port, s.ledger.Mode(), worm.Mode(), gate.Mode())
-	log.Fatal(http.ListenAndServe(":"+cfg.Port, mux))
+	log.Fatal(httpx.ListenAndServe(":"+cfg.Port, mux))
 }
 
 func (s *Server) healthz(w http.ResponseWriter, _ *http.Request) {
