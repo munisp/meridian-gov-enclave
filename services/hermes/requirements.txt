@@ -1,7 +1,7 @@
-fastapi>=0.115
-uvicorn>=0.30
-pydantic>=2.7
-httpx>=0.27
-pytest>=8.0
-PyJWT[crypto]>=2.8
+fastapi==0.141.1
+uvicorn==0.52.4
+pydantic==2.13.4
+httpx==0.28.1
+pytest==9.1.1
+PyJWT[crypto]==2.13.0
 # optional: redis>=5.0 (memory), kafka-python>=2.0 (audit sink)
