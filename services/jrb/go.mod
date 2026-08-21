@@ -5,6 +5,7 @@ go 1.23
 require (
 	github.com/munisp/meridian-gov-enclave/packages/authx v0.0.0
 	github.com/munisp/meridian-gov-enclave/packages/eventx v0.0.0
+	github.com/munisp/meridian-gov-enclave/packages/httpx v0.0.0
 	github.com/munisp/meridian-gov-enclave/packages/keyx v0.0.0
 	github.com/munisp/meridian-gov-enclave/packages/storex v0.0.0
 	gopkg.in/yaml.v3 v3.0.1
@@ -13,6 +14,7 @@ require (
 replace (
 	github.com/munisp/meridian-gov-enclave/packages/authx => ../../packages/authx
 	github.com/munisp/meridian-gov-enclave/packages/eventx => ../../packages/eventx
+	github.com/munisp/meridian-gov-enclave/packages/httpx => ../../packages/httpx
 	github.com/munisp/meridian-gov-enclave/packages/keyx => ../../packages/keyx
 	github.com/munisp/meridian-gov-enclave/packages/storex => ../../packages/storex
 )

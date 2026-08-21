@@ -16,7 +16,7 @@ jobs:
       - name: build/vet/test per Go module
         run: |
           set -e
-          for m in packages/authx packages/storex packages/eventx \
+          for m in packages/authx packages/storex packages/eventx packages/httpx \
                    services/jrb services/ombud services/enclave-gateway; do
             echo "== $m"
             (cd "$m" && go mod tidy && go build ./... && go vet ./... && go test -race ./...)

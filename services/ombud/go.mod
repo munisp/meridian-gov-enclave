@@ -3,6 +3,7 @@ module github.com/munisp/meridian-gov-enclave/services/ombud
 go 1.23
 
 require (
+	github.com/munisp/meridian-gov-enclave/packages/httpx v0.0.0
 	github.com/munisp/meridian-gov-enclave/packages/authx v0.0.0
 	github.com/munisp/meridian-gov-enclave/packages/eventx v0.0.0
 	github.com/munisp/meridian-gov-enclave/packages/storex v0.0.0
@@ -27,3 +28,5 @@ replace github.com/munisp/meridian-gov-enclave/packages/authx => ../../packages/
 replace github.com/munisp/meridian-gov-enclave/packages/eventx => ../../packages/eventx
 
 replace github.com/munisp/meridian-gov-enclave/packages/storex => ../../packages/storex
+
+replace github.com/munisp/meridian-gov-enclave/packages/httpx => ../../packages/httpx
