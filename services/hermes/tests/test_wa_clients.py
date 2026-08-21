@@ -155,7 +155,9 @@ def test_prod_startup_fail_closed_with_only_notification_url():
                             notification_url=NOTIF))
 
 
-def test_prod_startup_ok_with_both_urls():
+def test_prod_startup_ok_with_both_urls(monkeypatch):
+    # A1-08: prod keycloak startup now also requires KEYCLOAK_AUDIENCE.
+    monkeypatch.setenv("KEYCLOAK_AUDIENCE", "hermes")
     app = create_app(Settings(profile="prod", auth_mode="keycloak",
                               whatsapp_app_secret="prod-secret",
                               notification_url=NOTIF, identity_url=IDENT))

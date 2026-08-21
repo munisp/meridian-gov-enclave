@@ -15,12 +15,14 @@ from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
 
 from . import casefeed, disclosure, features, ingest, scoring, workflows
-from .auth import principal_from, problem
+from .auth import principal_from, problem, validate_auth_config
 from .config import get_settings
 from .lakehouse import Lakehouse, get_lakehouse
 from .tingraph import TinGraph, get_tin_graph
 
 settings = get_settings()
+# A1-08: prod keycloak mode without KEYCLOAK_AUDIENCE refuses to boot.
+validate_auth_config(settings.auth_mode, os.environ.get("PROFILE", "prod" if settings.auth_mode == "keycloak" else "dev"))
 lh: Lakehouse = get_lakehouse(os.path.join(settings.data_root, "lakehouse"))
 tg: TinGraph = get_tin_graph(settings.tin_graph_url, settings.data_root)
 _pack = disclosure.load_pack(settings)
