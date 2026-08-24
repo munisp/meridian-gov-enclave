@@ -19,6 +19,11 @@ class Settings:
     signing_key_pem: str = os.environ.get("RECEIPTS_SIGNING_KEY_PEM", "")
     # Optional event bus for nrs.receipts.issued.v1; local outbox otherwise.
     event_bus_url: str = os.environ.get("EVENT_BUS_URL", "")
+    # Payments service used to verify the payment a receipt asserts
+    # (B3 #11). REQUIRED in prod (fail-closed): receipts are never minted
+    # for caller-asserted payments. Dev may run without it (tagged
+    # payment_verification="dev-unverified").
+    payments_url: str = os.environ.get("PAYMENTS_SVC_URL", "")
 
     @property
     def prod(self) -> bool:

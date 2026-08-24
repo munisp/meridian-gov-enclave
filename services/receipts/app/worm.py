@@ -63,6 +63,22 @@ class WormStore:
                     return rec
         return None
 
+    def rrrs(self) -> set[str]:
+        """All RRR references ever minted (B3 #11: RRR minting is
+        collision-checked against the authoritative WORM store, not an
+        empty set)."""
+        out: set[str] = set()
+        if not os.path.exists(self._path):
+            return out
+        with open(self._path, "r", encoding="utf-8") as fh:
+            for line in fh:
+                if not line.strip():
+                    continue
+                rrr = json.loads(line)["payload"].get("rrr")
+                if rrr:
+                    out.add(rrr)
+        return out
+
     def verify_chain(self) -> bool:
         if not os.path.exists(self._path):
             return True
@@ -78,3 +94,39 @@ class WormStore:
                     return False
                 prev = rec["record_hash"]
         return True
+
+
+class IdempotencyStore:
+    """Durable idempotency bindings for receipt issuance (B3 #11).
+
+    Append-only JSONL mapping idempotency key -> {payload_hash,
+    receipt_id}. Survives restarts (the previous in-memory dict lost
+    every binding on restart, allowing duplicate receipts per event).
+    The binding is payload-bound: replaying a key with a different
+    request payload is a 409 conflict, not a silent replay.
+    """
+
+    def __init__(self, root: str) -> None:
+        self._path = os.path.join(root, "idempotency.jsonl")
+        self._lock = threading.Lock()
+        os.makedirs(root, exist_ok=True)
+        self._by_key: dict[str, dict] = {}
+        if os.path.exists(self._path):
+            with open(self._path, "r", encoding="utf-8") as fh:
+                for line in fh:
+                    if line.strip():
+                        rec = json.loads(line)
+                        self._by_key[rec["key"]] = rec
+
+    def get(self, key: str) -> dict | None:
+        return self._by_key.get(key)
+
+    def record(self, key: str, payload_hash: str, receipt_id: str) -> None:
+        rec = {"key": key, "payload_hash": payload_hash,
+               "receipt_id": receipt_id}
+        with self._lock:
+            with open(self._path, "a", encoding="utf-8") as fh:
+                fh.write(json.dumps(rec, sort_keys=True) + "\n")
+                fh.flush()
+                os.fsync(fh.fileno())
+            self._by_key[key] = rec

@@ -22,7 +22,8 @@ H = {"X-Dev-Role": "operator"}
 
 BODY = {"tin": "12345678-0001", "payer_name": "Ada Lovelace",
         "amount_kobo": 450_000_00, "tax_type": "VAT", "period": "2026-02",
-        "payment_channel": "remita", "idempotency_key": "pay-1"}
+        "payment_channel": "remita", "idempotency_key": "pay-1",
+        "payment_ref": "PAY-001"}
 
 
 def test_health_ready_auth():
