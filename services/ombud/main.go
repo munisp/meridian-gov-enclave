@@ -266,9 +266,24 @@ func (s *Server) resolveDeposit(w http.ResponseWriter, r *http.Request, settle b
 	if !s.requireGate(w) {
 		return
 	}
+	// B2-#7: moving deposit money (release to appellant / settle to
+	// revenue) is a privileged funds action — admin (registry) or
+	// operator (clerk) only, per platform role convention; members and
+	// unmapped principals may not move money.
+	p := r.Context().Value(ctxPrincipal).(*Principal)
+	if role := s.roleOf(r, p); role == RoleMember {
+		writeProblem(w, http.StatusForbidden, "Forbidden",
+			"deposit release/settle requires admin or operator role")
+		return
+	}
 	c, ok := s.cases.Get(r.PathValue("id"))
 	if !ok || c.Deposit == nil {
 		writeProblem(w, http.StatusNotFound, "Not found", "no deposit hold on case")
+		return
+	}
+	if c.Deposit.Status != "held" {
+		writeProblem(w, http.StatusConflict, "Conflict",
+			"deposit already "+c.Deposit.Status)
 		return
 	}
 	var err error
@@ -282,10 +297,19 @@ func (s *Server) resolveDeposit(w http.ResponseWriter, r *http.Request, settle b
 		return
 	}
 	verb := "released (code 7) to appellant"
+	status := "released"
 	if settle {
 		verb = "settled (code 5) to revenue"
+		status = "settled"
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"hold_id": c.Deposit.HoldID, "result": verb})
+	// B3 #8: the ledger movement succeeded — persist the terminal status
+	// so the DepositHold row no longer lies "held" after the money moved.
+	if err := s.cases.SetDepositStatus(c.ID, status,
+		fmt.Sprintf("hold %s %s", c.Deposit.HoldID, verb)); err != nil {
+		writeProblem(w, http.StatusInternalServerError, "Store error", err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"hold_id": c.Deposit.HoldID, "result": verb, "status": status})
 }
 
 // ------------------------------------------------------------------ documents & evidence packs

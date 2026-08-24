@@ -226,6 +226,28 @@ func (s *CaseStore) AttachDeposit(id string, h *DepositHold) error {
 	return nil
 }
 
+// SetDepositStatus records the terminal status of a deposit hold
+// ("released" | "settled") after the ledger movement succeeded (B3 #8).
+// Without this the DepositHold row stayed "held" forever even though the
+// money had moved on ledger 500.
+func (s *CaseStore) SetDepositStatus(id, status, detail string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	c, ok := s.byID[id]
+	if !ok {
+		return errNotFound
+	}
+	if c.Deposit == nil {
+		return errNotFound
+	}
+	c.Deposit.Status = status
+	c.UpdatedAt = time.Now().UTC().Format(time.RFC3339)
+	c.History = append(c.History, HistoryEntry{At: c.UpdatedAt, Actor: "system",
+		Action: "deposit_" + status, Detail: detail})
+	s.saveLocked()
+	return nil
+}
+
 func (s *CaseStore) AddDocument(id string, doc CaseDoc) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
