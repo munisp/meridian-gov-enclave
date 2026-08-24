@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"crypto/subtle"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -92,7 +93,10 @@ func (s *Server) pipeline(w http.ResponseWriter, r *http.Request, f *Flow) {
 		// F6 EOI: enclave-internal; never accepted from north-south callers.
 		// The shared internal token IS the authorisation (mTLS in prod profile);
 		// north-south scope checks do not apply.
-		if r.Header.Get("X-Internal-Flow-Token") != s.cfg.InternalFlowToken {
+		// B4-7: constant-time comparison — a plain != leaks a timing oracle
+		// that could be used to recover the token byte-by-byte.
+		if subtle.ConstantTimeCompare([]byte(r.Header.Get("X-Internal-Flow-Token")),
+			[]byte(s.cfg.InternalFlowToken)) != 1 {
 			writeProblem(w, http.StatusForbidden, "Forbidden",
 				"F6 (EOI exchange) is enclave-internal and not a north-south flow")
 			return
