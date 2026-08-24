@@ -201,6 +201,11 @@ def add_whatsapp_routes(app: FastAPI, s: Settings, audit: AuditChain,
         access_token=s.whatsapp_access_token,
         phone_number_id=s.whatsapp_phone_number_id,
         graph_url=s.whatsapp_graph_url)
+    if s.profile == "prod" and wa.sim:
+        raise RuntimeError(
+            "hermes whatsapp: PROFILE=prod requires WHATSAPP_ACCESS_TOKEN and "
+            "WHATSAPP_PHONE_NUMBER_ID — SIM send (fake sim-wamid-* ids, payload "
+            "only logged) is dev-only (fail-closed); refusing to start")
     if wa.sim:
         log.warning("hermes whatsapp: SIM mode (no WHATSAPP_ACCESS_TOKEN/"
                     "WHATSAPP_PHONE_NUMBER_ID) - sends are logged, not delivered")

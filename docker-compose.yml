@@ -13,7 +13,7 @@ services:
       PORT: "8400"
       GATEWAY_DATA_ROOT: /data
       AUTH_MODE: dev
-      # AUDIT_EVIDENCE_URL: http://audit-evidence:8007
+      # AUDIT_EVIDENCE_URL: http://audit-evidence:8004
       # JRB_URL: http://jrb:8402
     ports: ["8400:8400"]
 
@@ -28,7 +28,7 @@ services:
       PORT: "8401"
       ANALYTICS_DATA_ROOT: /data
       AUTH_MODE: dev
-      # TIN_GRAPH_URL: http://tin-graph:8002
+      # TIN_GRAPH_URL: http://tin-graph:8003
     ports: ["8401:8401"]
 
   jrb:
@@ -56,9 +56,9 @@ services:
       PORT: "8403"
       OMBUD_DATA_ROOT: /data
       AUTH_MODE: dev
-      # LEDGER_URL: http://ledger:8005
-      # AUDIT_EVIDENCE_URL: http://audit-evidence:8007
-      # REG_WATCH_URL: http://reg-watch:8010
+      # LEDGER_URL: http://ledger:8010
+      # AUDIT_EVIDENCE_URL: http://audit-evidence:8004
+      # REG_WATCH_URL: http://reg-watch:8014
     ports: ["8403:8403"]
 
   gov-console:

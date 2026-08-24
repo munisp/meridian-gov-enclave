@@ -86,7 +86,7 @@ unchanged (bound or not).
 4. WhatsApp > Configuration > Webhook: callback URL
    `https://<gateway-host>/v1/whatsapp/webhook`, verify token = your
    `WHATSAPP_VERIFY_TOKEN`. Subscribe to the `messages` field.
-5. Route traffic: expose the hermes service (default :8405) via the APISIX
+5. Route traffic: expose the hermes service (default :8407) via the APISIX
    gateway / ingress so Meta can reach both GET and POST.
 
 ## Environment variables

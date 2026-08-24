@@ -160,8 +160,20 @@ def test_prod_startup_ok_with_both_urls(monkeypatch):
     monkeypatch.setenv("KEYCLOAK_AUDIENCE", "hermes")
     app = create_app(Settings(profile="prod", auth_mode="keycloak",
                               whatsapp_app_secret="prod-secret",
+                              whatsapp_access_token="tok",
+                              whatsapp_phone_number_id="pn-1",
                               notification_url=NOTIF, identity_url=IDENT))
     assert app is not None
+
+
+def test_prod_startup_fail_closed_sim_whatsapp(monkeypatch):
+    # B1 finding #12: prod with only APP_SECRET set must not run SIM send
+    # (fake sim-wamid-* ids); ACCESS_TOKEN + PHONE_NUMBER_ID are required.
+    monkeypatch.setenv("KEYCLOAK_AUDIENCE", "hermes")
+    with pytest.raises(RuntimeError, match="WHATSAPP_ACCESS_TOKEN"):
+        create_app(Settings(profile="prod", auth_mode="keycloak",
+                            whatsapp_app_secret="prod-secret",
+                            notification_url=NOTIF, identity_url=IDENT))
 
 
 # ---------------------------------------------------------------------------

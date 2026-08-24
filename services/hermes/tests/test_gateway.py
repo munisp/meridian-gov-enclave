@@ -55,6 +55,8 @@ def test_prod_profile_disables_dev_auth():
     from hermes.config import Settings
     c = TestClient(create_app(Settings(auth_mode="dev", profile="prod",
                                        whatsapp_app_secret="prod-secret",
+                                       whatsapp_access_token="tok",
+                                       whatsapp_phone_number_id="pn-1",
                                        notification_url="http://notification:8080",
                                        identity_url="http://identity:8080")))
     r = c.post("/v1/chat", json={"agent": "taxpayer-copilot", "message": "hi"},

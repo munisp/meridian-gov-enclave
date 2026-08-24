@@ -54,7 +54,7 @@ def _service_urls() -> dict[str, str]:
 class Settings:
     service_name: str = "hermes"
     version: str = "0.1.0"
-    port: int = int(os.environ.get("PORT", "8405"))
+    port: int = int(os.environ.get("PORT", "8407"))
     # Auth: dev (HS256 + X-Dev-Role, sibling pattern) | keycloak (RS256, fail-closed)
     auth_mode: str = os.environ.get("AUTH_MODE", "dev")
     jwt_secret: str = os.environ.get("MERIDIAN_DEV_JWT_SECRET", "meridian-dev-secret")

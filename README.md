@@ -19,7 +19,7 @@ government consoles. Contract: `SPEC.md` §5 (this repo pins core contracts v1).
    ┌──────────────────┼─────────────────────┬───────────────────┐
    ▼                  ▼                     ▼                   ▼
 services/analytics  services/jrb         services/ombud   services/hermes
-(Python, :8401)     (Go, :8402)          (Go, :8403)      (Python, :8405)
+(Python, :8401)     (Go, :8402)          (Go, :8403)      (Python, :8407)
 T4+T15 lakehouse    T11 authority        T13i case        agentic copilots
 + scoring + NSW     registry, EOI,       registry,        (SPEC D) + core:
 customs products    adapters, NTAA       deposits (500),  tin-graph, ledger,
@@ -29,7 +29,7 @@ customs products    adapters, NTAA       deposits (500),  tin-graph, ledger,
                                                           set; local fallbacks
                                                           otherwise)
                       │
-        services/hermes (Python FastAPI, :8405): SPEC D agentic copilots
+        services/hermes (Python FastAPI, :8407): SPEC D agentic copilots
         (taxpayer / auditor / ops / policy / onboarding), ollama tool-use,
         guardrailed + hash-chained audit to hermes.toolcalls.v1
         consoles/gov-console (React 18 + TS + Vite + Tailwind, :8404)
