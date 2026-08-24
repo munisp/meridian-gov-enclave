@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"hash/fnv"
 	"net/http"
+	"os"
 	"sync"
 	"time"
 )
@@ -81,7 +82,22 @@ func (c *CoreLedgerClient) Mode() string { return "core-ledger-api" }
 
 func (c *CoreLedgerClient) post(path string, body any, out any) error {
 	raw, _ := json.Marshal(body)
-	resp, err := c.http.Post(c.base+path, "application/json", bytes.NewReader(raw))
+	req, err := http.NewRequest(http.MethodPost, c.base+path, bytes.NewReader(raw))
+	if err != nil {
+		return err
+	}
+	req.Header.Set("Content-Type", "application/json")
+	// B3 #5: service-to-service auth — shared env-injected token in prod
+	// (validated fail-closed by the core ledger); X-Dev-Role is dev-only.
+	req.Header.Set("X-Service-Name", "ombud")
+	if tok := os.Getenv("MERIDIAN_SERVICE_TOKEN"); tok != "" {
+		req.Header.Set("X-Service-Token", tok)
+	} else if tok := os.Getenv("LEDGER_SERVICE_TOKEN"); tok != "" {
+		req.Header.Set("X-Service-Token", tok)
+	} else {
+		req.Header.Set("X-Dev-Role", "operator") // dev only
+	}
+	resp, err := c.http.Do(req)
 	if err != nil {
 		return err
 	}
