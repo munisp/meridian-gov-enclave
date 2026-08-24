@@ -130,3 +130,39 @@ class IdempotencyStore:
                 fh.flush()
                 os.fsync(fh.fileno())
             self._by_key[key] = rec
+
+
+class PaymentConsumptionStore:
+    """Durable payment_ref -> receipt consumption binding (R3 verifier hole
+    in gov #29): previously one payment_ref could mint unlimited receipts
+    via distinct idempotency keys. The FIRST successful issuance consumes
+    the payment_ref; every later issuance attempt for the same payment_ref
+    returns the existing receipt (200) instead of minting a second one.
+
+    Append-only JSONL, same durability model as IdempotencyStore (survives
+    restarts; holds in prod, where verify_payment never re-checks this).
+    """
+
+    def __init__(self, root: str) -> None:
+        self._path = os.path.join(root, "payment_consumption.jsonl")
+        self._lock = threading.Lock()
+        os.makedirs(root, exist_ok=True)
+        self._by_ref: dict[str, dict] = {}
+        if os.path.exists(self._path):
+            with open(self._path, "r", encoding="utf-8") as fh:
+                for line in fh:
+                    if line.strip():
+                        rec = json.loads(line)
+                        self._by_ref[rec["payment_ref"]] = rec
+
+    def get(self, payment_ref: str) -> dict | None:
+        return self._by_ref.get(payment_ref)
+
+    def record(self, payment_ref: str, receipt_id: str) -> None:
+        rec = {"payment_ref": payment_ref, "receipt_id": receipt_id}
+        with self._lock:
+            with open(self._path, "a", encoding="utf-8") as fh:
+                fh.write(json.dumps(rec, sort_keys=True) + "\n")
+                fh.flush()
+                os.fsync(fh.fileno())
+            self._by_ref[payment_ref] = rec

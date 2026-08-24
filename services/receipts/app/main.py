@@ -7,17 +7,19 @@ REAL/SIM tags in README and per module docstrings.
 from __future__ import annotations
 
 import base64
+import threading
 
 from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 from fastapi import FastAPI, Request
+from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 
 from . import core
 from .config import get_settings
 from .key_provider import build_signer
 from .util import new_ulid, principal_from, problem
-from .worm import IdempotencyStore, WormStore
+from .worm import IdempotencyStore, PaymentConsumptionStore, WormStore
 
 settings = get_settings()
 app = FastAPI(title="Meridian Gov-Enclave Receipts", version=settings.version)
@@ -28,6 +30,13 @@ outbox: list[dict] = []           # SIM event outbox when EVENT_BUS_URL unset
 # lost every binding on restart and silently replayed on key reuse with a
 # different payload).
 idem_store = IdempotencyStore(settings.worm_root)
+# R3 verifier hole (gov #29): durable payment_ref consumption — one payment
+# mints exactly one receipt, regardless of idempotency key rotation.
+consumption_store = PaymentConsumptionStore(settings.worm_root)
+# Serializes payment-consumption check + receipt mint + binding record so
+# concurrent issuances of the same payment_ref cannot both mint (the
+# consumption store itself is durable; this closes the in-process race).
+_issue_lock = threading.Lock()
 
 
 def _b64e(b: bytes) -> str:
@@ -156,6 +165,23 @@ def issue(body: IssueIn):
     if not signer.available:
         return problem(503, "Signing unavailable",
                        "RECEIPTS_SIGNING_KEY_PEM unset (fail-closed prod)")
+    with _issue_lock:
+        # R3: a consumed payment_ref returns the already-issued receipt
+        # (200) instead of minting a duplicate under a fresh idempotency key.
+        consumed = consumption_store.get(body.payment_ref)
+        if consumed is not None:
+            rec = worm.get(consumed["receipt_id"])
+            if rec is not None:
+                payload = dict(rec["payload"])
+                payload["worm_record_hash"] = rec["record_hash"]
+                payload["duplicate_payment_ref"] = True
+                return JSONResponse(status_code=200, content=payload)
+        return _issue_new(body, payload_hash)
+
+
+def _issue_new(body: IssueIn, payload_hash: str):
+    """Mint a brand-new receipt. Caller holds _issue_lock and has confirmed
+    the payment_ref is unconsumed."""
     # B3 #11: bind receipt minting to a verified payment event.
     payment_verification = "verified"
     if settings.payments_url:
@@ -186,6 +212,10 @@ def issue(body: IssueIn):
         "qr_verification": f"NRSRCT1|{rrr}|{receipt['amount_kobo']}|{sig}",
     })
     worm_rec = worm.append(receipt)
+    # consume the payment_ref durably the moment the receipt exists in
+    # WORM — a later event-bus 502 leaves the receipt recoverable via the
+    # consumption binding (200 on retry) rather than re-mintable.
+    consumption_store.record(body.payment_ref, receipt_id)
     # hash echoed on the response only; the WORM payload stays immutable
     receipt["worm_record_hash"] = worm_rec["record_hash"]
     event = core.issued_event(receipt, worm_rec["record_hash"])

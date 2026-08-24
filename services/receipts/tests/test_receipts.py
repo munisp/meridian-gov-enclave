@@ -63,8 +63,12 @@ def test_issue_receipt_content_and_verify():
 
 
 def test_unique_rrr_across_receipts():
-    b1 = dict(BODY, idempotency_key="pay-a", period="2026-03")
-    b2 = dict(BODY, idempotency_key="pay-b", period="2026-04")
+    # distinct receipts require distinct payments (R3: one payment_ref mints
+    # exactly one receipt, regardless of idempotency key rotation)
+    b1 = dict(BODY, idempotency_key="pay-a", period="2026-03",
+              payment_ref="PAY-001")
+    b2 = dict(BODY, idempotency_key="pay-b", period="2026-04",
+              payment_ref="PAY-002")
     r1 = client.post("/v1/receipts", json=b1, headers=H).json()
     r2 = client.post("/v1/receipts", json=b2, headers=H).json()
     assert r1["rrr"] != r2["rrr"]
