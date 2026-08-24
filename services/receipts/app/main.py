@@ -7,24 +7,36 @@ REAL/SIM tags in README and per module docstrings.
 from __future__ import annotations
 
 import base64
+import threading
 
 from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 from fastapi import FastAPI, Request
+from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 
 from . import core
 from .config import get_settings
 from .key_provider import build_signer
 from .util import new_ulid, principal_from, problem
-from .worm import WormStore
+from .worm import IdempotencyStore, PaymentConsumptionStore, WormStore
 
 settings = get_settings()
 app = FastAPI(title="Meridian Gov-Enclave Receipts", version=settings.version)
 
 worm = WormStore(settings.worm_root)
 outbox: list[dict] = []           # SIM event outbox when EVENT_BUS_URL unset
-_by_idem: dict[str, str] = {}
+# B3 #11: durable, payload-bound idempotency (was an in-memory dict that
+# lost every binding on restart and silently replayed on key reuse with a
+# different payload).
+idem_store = IdempotencyStore(settings.worm_root)
+# R3 verifier hole (gov #29): durable payment_ref consumption — one payment
+# mints exactly one receipt, regardless of idempotency key rotation.
+consumption_store = PaymentConsumptionStore(settings.worm_root)
+# Serializes payment-consumption check + receipt mint + binding record so
+# concurrent issuances of the same payment_ref cannot both mint (the
+# consumption store itself is durable; this closes the in-process race).
+_issue_lock = threading.Lock()
 
 
 def _b64e(b: bytes) -> str:
@@ -120,6 +132,10 @@ class IssueIn(BaseModel):
     period: str
     payment_channel: str
     idempotency_key: str
+    # B3 #11: the payment this receipt asserts. Verified against the
+    # payments service in prod; receipts for caller-asserted payments are
+    # a dev-only (tagged) path.
+    payment_ref: str = ""
 
 
 @app.post("/v1/receipts", status_code=201)
@@ -131,19 +147,63 @@ def issue(body: IssueIn):
         return problem(422, "Invalid receipt", str(exc))
     if not body.idempotency_key:
         return problem(422, "Invalid receipt", "idempotency_key required")
-    if body.idempotency_key in _by_idem:
-        rec = worm.get(_by_idem[body.idempotency_key])
-        return rec["payload"]
+    if not body.payment_ref:
+        return problem(422, "Invalid receipt", "payment_ref required")
+    payload_hash = core.request_payload_hash(
+        body.tin, body.payer_name, body.amount_kobo, body.tax_type,
+        body.period, body.payment_channel, body.payment_ref)
+    binding = idem_store.get(body.idempotency_key)
+    if binding is not None:
+        if binding["payload_hash"] != payload_hash:
+            return problem(409, "Idempotency conflict",
+                           "idempotency_key reused with a different payload")
+        rec = worm.get(binding["receipt_id"])
+        if rec is not None:
+            return rec["payload"]
+        # binding without a receipt = crash window between mint and
+        # record; fall through and re-issue for the same payload.
     if not signer.available:
         return problem(503, "Signing unavailable",
                        "RECEIPTS_SIGNING_KEY_PEM unset (fail-closed prod)")
+    with _issue_lock:
+        # R3: a consumed payment_ref returns the already-issued receipt
+        # (200) instead of minting a duplicate under a fresh idempotency key.
+        consumed = consumption_store.get(body.payment_ref)
+        if consumed is not None:
+            rec = worm.get(consumed["receipt_id"])
+            if rec is not None:
+                payload = dict(rec["payload"])
+                payload["worm_record_hash"] = rec["record_hash"]
+                payload["duplicate_payment_ref"] = True
+                return JSONResponse(status_code=200, content=payload)
+        return _issue_new(body, payload_hash)
+
+
+def _issue_new(body: IssueIn, payload_hash: str):
+    """Mint a brand-new receipt. Caller holds _issue_lock and has confirmed
+    the payment_ref is unconsumed."""
+    # B3 #11: bind receipt minting to a verified payment event.
+    payment_verification = "verified"
+    if settings.payments_url:
+        try:
+            core.verify_payment(settings.payments_url, body.payment_ref,
+                                tin=body.tin, amount_kobo=body.amount_kobo)
+        except core.ReceiptError as exc:
+            return problem(422, "Unverified payment", str(exc))
+    elif settings.prod:
+        return problem(503, "Payment verification unavailable",
+                       "PAYMENTS_SVC_URL unset (fail-closed prod): refusing "
+                       "to mint a receipt for an unverified payment")
+    else:
+        payment_verification = "dev-unverified"  # dev only, tagged
     receipt_id = f"RCT-{new_ulid()}"
-    existing = set()  # WORM is authoritative; ULID collision is implausible
-    rrr = core.mint_rrr(existing)
+    rrr = core.mint_rrr(worm.rrrs())  # collision-checked against WORM
     receipt = core.build_receipt(
         receipt_id, rrr, tin=body.tin, payer_name=body.payer_name,
         amount_kobo=body.amount_kobo, tax_type=body.tax_type,
-        period=body.period, channel=body.payment_channel)
+        period=body.period, channel=body.payment_channel,
+        payment_ref=body.payment_ref,
+        payment_verification=payment_verification)
     sig = signer.sign(core.canonical_payload(receipt))
     receipt.update({
         "signature_b64": sig,
@@ -152,6 +212,10 @@ def issue(body: IssueIn):
         "qr_verification": f"NRSRCT1|{rrr}|{receipt['amount_kobo']}|{sig}",
     })
     worm_rec = worm.append(receipt)
+    # consume the payment_ref durably the moment the receipt exists in
+    # WORM — a later event-bus 502 leaves the receipt recoverable via the
+    # consumption binding (200 on retry) rather than re-mintable.
+    consumption_store.record(body.payment_ref, receipt_id)
     # hash echoed on the response only; the WORM payload stays immutable
     receipt["worm_record_hash"] = worm_rec["record_hash"]
     event = core.issued_event(receipt, worm_rec["record_hash"])
@@ -164,7 +228,7 @@ def issue(body: IssueIn):
     else:
         outbox.append(event)
     receipt["event_mode"] = mode
-    _by_idem[body.idempotency_key] = receipt_id
+    idem_store.record(body.idempotency_key, payload_hash, receipt_id)
     return receipt
 
 
