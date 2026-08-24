@@ -100,7 +100,8 @@ var WorkflowNames = []string{
 
 // GatewayClient is the ONLY cross-zone send path: enclave-gateway F6 with WORM
 // receipt capture. When the gateway URL is unset, a local simulated receipt is
-// returned (honesty tag: mode=simulated-local).
+// returned (honesty tag: mode=simulated-local) — dev only: main() refuses to
+// boot under PROFILE=prod without ENCLAVE_GATEWAY_URL.
 type GatewayClient struct {
 	base  string
 	token string

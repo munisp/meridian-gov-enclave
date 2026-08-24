@@ -44,6 +44,9 @@ type Server struct {
 
 func main() {
 	cfg := loadConfig()
+	if os.Getenv("PROFILE") == "prod" && cfg.EnclaveGatewayURL == "" {
+		log.Fatal("profile=prod FATAL: ENCLAVE_GATEWAY_URL is required — refusing to boot with simulated-local F6 EOI receipts (fail-closed)")
+	}
 	pg, err := storex.Open(context.Background(), cfg.DatabaseURL, "jrb",
 		storex.DocTableDDL(AuthoritiesTable), storex.DocTableDDL(EOITable))
 	if err != nil {
