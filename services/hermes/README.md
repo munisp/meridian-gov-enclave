@@ -56,7 +56,7 @@ response it produces is tagged `sim: true`.
 
 ```
 pip install -r requirements.txt
-AUTH_MODE=dev uvicorn hermes.gateway.main:app --port 8405
+AUTH_MODE=dev uvicorn hermes.gateway.main:app --port 8407
 python -m pytest tests -q
 python -m hermes.eval.runner     # gates: accuracy>=90%, refusal 100%, groundedness>=95%
 ```
