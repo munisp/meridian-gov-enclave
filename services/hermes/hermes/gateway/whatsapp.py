@@ -35,6 +35,7 @@ from ..agent.audit import AuditChain
 from ..agent.guardrails import redact_text
 from ..config import Settings
 from .prompts import system_prompt
+from .wa_invoice import EinvoicingClient, InvoiceFlow
 from .wa_onboarding import (IdentityExchangeError, OtpDeliveryError, OtpManager,
                             OtpSender, SimOtpSender, SimTokenIssuer,
                             TokenIssuer, WaStores, build_wa_stores, mask_tin,
@@ -192,7 +193,8 @@ def add_whatsapp_routes(app: FastAPI, s: Settings, audit: AuditChain,
                         stores: Optional[WaStores] = None,
                         otp: Optional[OtpManager] = None,
                         otp_sender: Optional[OtpSender] = None,
-                        token_issuer: Optional[TokenIssuer] = None) -> WhatsAppClient:
+                        token_issuer: Optional[TokenIssuer] = None,
+                        invoice_client: Optional[EinvoicingClient] = None) -> WhatsAppClient:
     if s.profile == "prod" and not s.whatsapp_app_secret:
         raise RuntimeError(
             "hermes whatsapp: PROFILE=prod requires WHATSAPP_APP_SECRET "
@@ -223,6 +225,19 @@ def add_whatsapp_routes(app: FastAPI, s: Settings, audit: AuditChain,
     token_issuer = token_issuer or SimTokenIssuer()
     app.state.whatsapp_sessions = stores.sessions   # exposed for ops/tests
     app.state.whatsapp_stores = stores
+
+    # Feature I4: e-invoice bot. Fail-closed gate: without the einvoicing
+    # base URL + service token the feature is disabled (explicit log); the
+    # bot answers "feature unavailable" and never calls anything.
+    einv = invoice_client or EinvoicingClient(
+        base_url=s.einvoicing_url, service_token=s.einvoicing_service_token,
+        timeout_s=s.einvoicing_timeout_s)
+    if not einv.enabled:
+        (log.error if s.profile == "prod" else log.warning)(
+            "hermes whatsapp: e-invoice feature DISABLED — "
+            "HERMES_EINVOICING_URL/HERMES_EINVOICING_SERVICE_TOKEN unset "
+            "(fail-closed%s)", " in prod" if s.profile == "prod" else "")
+    app.state.whatsapp_invoice_client = einv
 
     def _session(wa_id: str) -> dict[str, Any]:
         st = stores.sessions.get(wa_id)
@@ -390,6 +405,8 @@ def add_whatsapp_routes(app: FastAPI, s: Settings, audit: AuditChain,
                 return True
         return False
 
+    invoice_flow = InvoiceFlow(einv, wa, _save)
+
     def _process(messages: list[dict[str, Any]]) -> None:
         for msg in messages:
             if not stores.dedup.is_new(msg["id"]):
@@ -401,6 +418,8 @@ def add_whatsapp_routes(app: FastAPI, s: Settings, audit: AuditChain,
             if msg["kind"] == "button":
                 st = _session(wa_id)
                 _apply_binding(wa_id, st)
+                if invoice_flow.handle_button(wa_id, st, text, msg["id"]):
+                    continue
                 if text.startswith(CONFIRM_PREFIX) and st.get("pending"):
                     original = st.pop("pending")["message"]
                     _save(wa_id, st)
@@ -413,6 +432,9 @@ def add_whatsapp_routes(app: FastAPI, s: Settings, audit: AuditChain,
                     wa.send_text(wa_id, "No pending action to confirm.")
             else:
                 st = _session(wa_id)
+                _apply_binding(wa_id, st)   # mirror bound TIN into session
+                if invoice_flow.handle_text(wa_id, st, text, msg["id"]):
+                    continue
                 if not _onboard_text(wa_id, st, text):
                     _run_agent(wa_id, text)
 
