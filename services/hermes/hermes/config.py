@@ -105,6 +105,13 @@ class Settings:
     otp_send_timeout_s: float = float(os.environ.get("OTP_SEND_TIMEOUT_S", "5"))
     identity_url: str = os.environ.get("IDENTITY_URL", "")
     identity_exchange_timeout_s: float = float(os.environ.get("IDENTITY_EXCHANGE_TIMEOUT_S", "10"))
+    # WhatsApp e-invoice bot (Feature I4): compliance-suite einvoicing
+    # service. Both required for the feature; missing => the bot is disabled
+    # with an explicit log and answers "feature unavailable" (fail-closed,
+    # logged at error level under PROFILE=prod).
+    einvoicing_url: str = os.environ.get("HERMES_EINVOICING_URL", "")
+    einvoicing_service_token: str = os.environ.get("HERMES_EINVOICING_SERVICE_TOKEN", "")
+    einvoicing_timeout_s: float = float(os.environ.get("HERMES_EINVOICING_TIMEOUT_S", "15"))
     endpoints: dict = field(default_factory=lambda: dict(ENDPOINTS))
 
 

@@ -88,7 +88,8 @@ def truncate_ussd(text: str, max_chars: int) -> str:
 
 def create_app(settings: Optional[Settings] = None, whatsapp_client=None,
                whatsapp_stores=None, whatsapp_otp=None,
-               whatsapp_otp_sender=None, whatsapp_token_issuer=None) -> FastAPI:
+               whatsapp_otp_sender=None, whatsapp_token_issuer=None,
+               whatsapp_invoice_client=None) -> FastAPI:
     s = settings or get_settings()
     # A1-08: prod keycloak mode without KEYCLOAK_AUDIENCE refuses to boot.
     from .auth import validate_auth_config
@@ -161,7 +162,8 @@ def create_app(settings: Optional[Settings] = None, whatsapp_client=None,
     add_whatsapp_routes(app, s, audit, memory, build_loop, client=whatsapp_client,
                         stores=whatsapp_stores, otp=whatsapp_otp,
                         otp_sender=whatsapp_otp_sender or wa_otp_sender,
-                        token_issuer=whatsapp_token_issuer or wa_token_issuer)
+                        token_issuer=whatsapp_token_issuer or wa_token_issuer,
+                        invoice_client=whatsapp_invoice_client)
 
     return app
 
