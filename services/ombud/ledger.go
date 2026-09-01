@@ -9,6 +9,8 @@ import (
 	"os"
 	"sync"
 	"time"
+
+	"github.com/munisp/meridian-gov-enclave/packages/otelx"
 )
 
 // Ledger scheme (SPEC 1.5): ledger 500 = dispute_deposits. Account id is
@@ -75,7 +77,11 @@ type CoreLedgerClient struct {
 }
 
 func NewCoreLedgerClient(base string) *CoreLedgerClient {
-	return &CoreLedgerClient{base: base, http: &http.Client{Timeout: 8 * time.Second}}
+	// otelx.Client transport: every ledger call (hold/release/settle/balance)
+	// is a CLIENT span with traceparent/baggage injection. Telemetry is
+	// best-effort and never alters ledger semantics (money path rule).
+	return &CoreLedgerClient{base: base,
+		http: &http.Client{Timeout: 8 * time.Second, Transport: otelx.Client(nil)}}
 }
 
 func (c *CoreLedgerClient) Mode() string { return "core-ledger-api" }
