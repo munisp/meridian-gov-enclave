@@ -29,6 +29,13 @@ _pack = disclosure.load_pack(settings)
 
 app = FastAPI(title="Meridian Gov-Enclave Analytics", version=settings.version)
 
+# OTel bootstrap (DESIGN-CONTRACT.md): fail-soft, never breaks startup.
+# tenant.id stamped on spans + baggage for downstream hops.
+from .otel import TenantBaggageMiddleware, init_otel
+
+init_otel(app)
+app.add_middleware(TenantBaggageMiddleware)
+
 PUBLIC_PATHS = {"/healthz", "/readyz", "/openapi.json", "/docs", "/docs/oauth2-redirect"}
 
 

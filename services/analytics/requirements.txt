@@ -7,3 +7,8 @@ duckdb==1.5.5
 pyarrow==25.0.1
 pytest==9.1.1
 PyJWT[crypto]==2.13.0
+opentelemetry-sdk==1.38.0
+opentelemetry-exporter-otlp-proto-grpc==1.38.0
+opentelemetry-instrumentation-fastapi==0.59b0
+opentelemetry-instrumentation-httpx==0.59b0
+opentelemetry-instrumentation-requests==0.59b0
