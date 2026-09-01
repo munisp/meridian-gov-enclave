@@ -4,3 +4,8 @@ pydantic==2.13.4
 httpx==0.28.1
 cryptography==50.0.0
 pytest==9.1.1
+opentelemetry-sdk==1.38.0
+opentelemetry-exporter-otlp-proto-grpc==1.38.0
+opentelemetry-instrumentation-fastapi==0.59b0
+opentelemetry-instrumentation-httpx==0.59b0
+opentelemetry-instrumentation-requests==0.59b0
