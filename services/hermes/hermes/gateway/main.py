@@ -165,6 +165,14 @@ def create_app(settings: Optional[Settings] = None, whatsapp_client=None,
                         token_issuer=whatsapp_token_issuer or wa_token_issuer,
                         invoice_client=whatsapp_invoice_client)
 
+    # OTel bootstrap (DESIGN-CONTRACT.md): fail-soft, never breaks startup or
+    # money paths. Instruments FastAPI + outbound httpx/requests (einvoicing,
+    # whatsapp, receipts flows); tenant.id on spans + baggage.
+    from ..otel import TenantBaggageMiddleware, init_otel
+
+    init_otel(app)
+    app.add_middleware(TenantBaggageMiddleware)
+
     return app
 
 
