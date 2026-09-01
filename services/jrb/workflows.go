@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -116,14 +117,17 @@ type GatewaySendResult struct {
 }
 
 // SendF6EOI posts an EOI payload via gateway F6 (enclave-internal flow).
-func (g *GatewayClient) SendF6EOI(payload []byte) (*GatewaySendResult, error) {
+// ctx carries the request trace so the outbound span + W3C propagation
+// (otelx.Client transport) link the hop to the caller's trace; pass
+// context.Background() from workflow runners.
+func (g *GatewayClient) SendF6EOI(ctx context.Context, payload []byte) (*GatewaySendResult, error) {
 	if g.base == "" {
 		return &GatewaySendResult{
 			ReceiptID: fmt.Sprintf("sim-ev-%d", time.Now().UnixNano()),
 			SHA256:    "simulated", Mode: "simulated-local",
 		}, nil
 	}
-	req, err := http.NewRequest(http.MethodPost, g.base+"/flows/f6/eoi-exchange",
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, g.base+"/flows/f6/eoi-exchange",
 		bytes.NewReader(payload))
 	if err != nil {
 		return nil, err

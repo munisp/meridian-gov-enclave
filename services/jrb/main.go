@@ -21,6 +21,7 @@ import (
 	"github.com/munisp/meridian-gov-enclave/packages/eventx"
 	"github.com/munisp/meridian-gov-enclave/packages/httpx"
 	"github.com/munisp/meridian-gov-enclave/packages/keyx/provider"
+	"github.com/munisp/meridian-gov-enclave/packages/otelx"
 	"github.com/munisp/meridian-gov-enclave/packages/storex"
 )
 
@@ -44,6 +45,10 @@ type Server struct {
 
 func main() {
 	cfg := loadConfig()
+	// OTel bootstrap (otel-foundation contract): fail-soft no-op when
+	// OTEL_EXPORTER_OTLP_ENDPOINT is unset; prod logs a loud warning.
+	otelProv := otelx.InitProviders(context.Background())
+	defer otelProv.Shutdown(context.Background())
 	if os.Getenv("PROFILE") == "prod" && cfg.EnclaveGatewayURL == "" {
 		log.Fatal("profile=prod FATAL: ENCLAVE_GATEWAY_URL is required — refusing to boot with simulated-local F6 EOI receipts (fail-closed)")
 	}
@@ -79,10 +84,10 @@ func main() {
 	s := &Server{
 		cfg: cfg, authn: newAuthenticator(cfg), auth: auth, eoi: eoiStore, adapters: NewAdapterRegistry(),
 		formula: LoadAttributionFormula(cfg.PacksDir), signer: signer,
-		runner: NewWorkflowRunner(), http: &http.Client{Timeout: 10 * time.Second},
+		runner: NewWorkflowRunner(), http: &http.Client{Timeout: 10 * time.Second, Transport: otelx.Client(nil)},
 		emitter: emitter,
 		gateway: &GatewayClient{base: cfg.EnclaveGatewayURL, token: cfg.InternalFlowToken,
-			http: &http.Client{Timeout: 10 * time.Second}},
+			http: &http.Client{Timeout: 10 * time.Second, Transport: otelx.Client(nil)}},
 	}
 
 	mux := http.NewServeMux()
@@ -229,7 +234,7 @@ func (s *Server) createEOI(w http.ResponseWriter, r *http.Request) {
 		"eoi_id": e.ID, "requester_state": e.RequesterID, "responder_state": e.ResponderID,
 		"subject_pseudo_tin": e.SubjectPseudoTIN, "purpose": e.Purpose, "request": e.Request,
 	})
-	res, err := s.gateway.SendF6EOI(payload)
+	res, err := s.gateway.SendF6EOI(r.Context(), payload)
 	if err != nil {
 		writeProblem(w, http.StatusBadGateway, "Gateway send failed", err.Error())
 		return
@@ -471,7 +476,7 @@ func (s *Server) dispatchWorkflow(name string, p map[string]any) (*WorkflowRun, 
 				payload, _ := json.Marshal(map[string]any{
 					"eoi_id": e.ID, "requester_state": e.RequesterID,
 					"responder_state": e.ResponderID, "subject_pseudo_tin": e.SubjectPseudoTIN})
-				res, err := s.gateway.SendF6EOI(payload)
+				res, err := s.gateway.SendF6EOI(context.Background(), payload)
 				if err != nil {
 					return nil, err
 				}
