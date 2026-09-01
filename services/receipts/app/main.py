@@ -24,6 +24,13 @@ from .worm import IdempotencyStore, PaymentConsumptionStore, WormStore
 settings = get_settings()
 app = FastAPI(title="Meridian Gov-Enclave Receipts", version=settings.version)
 
+# OTel bootstrap (DESIGN-CONTRACT.md): fail-soft, never breaks startup or
+# money paths. tenant.id stamped on spans + baggage for downstream hops.
+from .otel import TenantBaggageMiddleware, init_otel
+
+init_otel(app)
+app.add_middleware(TenantBaggageMiddleware)
+
 worm = WormStore(settings.worm_root)
 outbox: list[dict] = []           # SIM event outbox when EVENT_BUS_URL unset
 # B3 #11: durable, payload-bound idempotency (was an in-memory dict that

@@ -22,6 +22,7 @@ import (
 	"github.com/munisp/meridian-gov-enclave/packages/authx"
 	"github.com/munisp/meridian-gov-enclave/packages/httpx"
 	"github.com/munisp/meridian-gov-enclave/packages/keyx/provider"
+	"github.com/munisp/meridian-gov-enclave/packages/otelx"
 )
 
 type ctxKey string
@@ -77,7 +78,8 @@ func main() {
 		log.Fatalf("permify authz (fail closed): %v", err)
 	}
 	s := &Server{cfg: cfg, authn: newAuthenticator(cfg),
-		http: &http.Client{Timeout: 10 * time.Second}, worm: worm, localWorm: local, perm: perm}
+		http: &http.Client{Timeout: 10 * time.Second, Transport: otelx.Client(nil)},
+		worm: worm, localWorm: local, perm: perm}
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /healthz", s.healthz)
@@ -104,7 +106,9 @@ func main() {
 
 	// NOTE: F9 and F10 have NO routes. Deny middleware below rejects their
 	// paths explicitly; there is no code path that can dispatch them.
-	handler := s.denyForbiddenFlows(s.logRequests(mux))
+	// otelx.Middleware stamps tenant.id server spans (route-template names)
+	// inside the deny layer so forbidden-flow rejects are also traced.
+	handler := s.denyForbiddenFlows(s.logRequests(otelx.Middleware(mux)))
 
 	addr := ":" + cfg.Port
 	tlsCfg, err := serverTLSConfig(cfg)

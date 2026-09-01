@@ -17,6 +17,7 @@ import (
 	"github.com/munisp/meridian-gov-enclave/packages/authx"
 	"github.com/munisp/meridian-gov-enclave/packages/eventx"
 	"github.com/munisp/meridian-gov-enclave/packages/httpx"
+	"github.com/munisp/meridian-gov-enclave/packages/otelx"
 	"github.com/munisp/meridian-gov-enclave/packages/storex"
 )
 
@@ -45,6 +46,10 @@ type Server struct {
 
 func main() {
 	cfg := loadConfig()
+	// OTel bootstrap (otel-foundation contract): fail-soft — never blocks
+	// startup or money paths; PROFILE=prod without endpoint warns loudly.
+	otelProv := otelx.InitProviders(context.Background())
+	defer otelProv.Shutdown(context.Background())
 	// Pack parameters (embedded fallback packs; production: rp-registry pins).
 	ackDays := packInt(cfg.PacksDir, "rp-procedure-ombud", "days", 7)
 	decideDays := 90
@@ -89,7 +94,7 @@ func main() {
 
 	log.Printf("ombud %s listening on :%s (ledger=%s worm=%s gate=%s)",
 		cfg.Version, cfg.Port, s.ledger.Mode(), worm.Mode(), gate.Mode())
-	log.Fatal(httpx.ListenAndServe(":"+cfg.Port, mux))
+	log.Fatal(httpx.ListenAndServe(":"+cfg.Port, otelx.Middleware(mux)))
 }
 
 func (s *Server) healthz(w http.ResponseWriter, _ *http.Request) {

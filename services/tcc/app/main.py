@@ -21,6 +21,13 @@ from .util import new_ulid, now_rfc3339, principal_from, problem
 settings = get_settings()
 app = FastAPI(title="Meridian Gov-Enclave TCC", version=settings.version)
 
+# OTel bootstrap (DESIGN-CONTRACT.md): fail-soft, never breaks startup or
+# money paths. tenant.id stamped on spans + baggage for downstream hops.
+from .otel import TenantBaggageMiddleware, init_otel
+
+init_otel(app)
+app.add_middleware(TenantBaggageMiddleware)
+
 store = core.TccStore()
 sim_ledger = ledger.SimLedger()
 try:

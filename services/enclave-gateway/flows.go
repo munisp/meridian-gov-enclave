@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"crypto/subtle"
 	"encoding/json"
 	"fmt"
@@ -137,7 +138,7 @@ func (s *Server) pipeline(w http.ResponseWriter, r *http.Request, f *Flow) {
 
 	// Dispatch to enclave consumer, forwarding the stamped caller identity.
 	caller, _ := r.Context().Value(ctxCaller).(string)
-	dispatch, err := s.dispatch(f, raw, caller)
+	dispatch, err := s.dispatch(r.Context(), f, raw, caller)
 	if err != nil {
 		writeProblem(w, http.StatusBadGateway, "Consumer dispatch failed", err.Error())
 		return
@@ -148,9 +149,9 @@ func (s *Server) pipeline(w http.ResponseWriter, r *http.Request, f *Flow) {
 	})
 }
 
-func (s *Server) dispatch(f *Flow, raw []byte, caller string) (map[string]any, error) {
+func (s *Server) dispatch(ctx context.Context, f *Flow, raw []byte, caller string) (map[string]any, error) {
 	if f.ConsumerURL != "" {
-		req, err := http.NewRequest(http.MethodPost, f.ConsumerURL, bytes.NewReader(raw))
+		req, err := http.NewRequestWithContext(ctx, http.MethodPost, f.ConsumerURL, bytes.NewReader(raw))
 		if err != nil {
 			return nil, err
 		}
