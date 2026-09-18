@@ -511,6 +511,57 @@ def test_dedup_survives_restart_simulation():
     assert len(rec1.texts()) + len(rec2.texts()) == 1   # processed exactly once
 
 
+# ---------------------------------------------------------------------------
+# Webhook hardening pin (R4 regression: these properties must never regress)
+# ---------------------------------------------------------------------------
+def test_hardening_redis_dedup_uses_set_nx_px():
+    """Message-id dedup must use Redis SET NX PX (atomic, expiring) — the
+    exact primitive that makes Meta redelivery processing idempotent across
+    instances/restarts."""
+    from hermes.gateway.wa_onboarding import RedisDedupStore
+
+    class SpyRedis:
+        def __init__(self):
+            self.calls = []
+            self.data = {}
+
+        def set(self, k, v, nx=False, px=None, ex=None):
+            self.calls.append((k, v, nx, px))
+            if nx and k in self.data:
+                return None
+            self.data[k] = v
+            return True
+
+    spy = SpyRedis()
+    d = RedisDedupStore(spy, ttl_s=60)
+    assert d.is_new("wamid.a") is True
+    assert d.is_new("wamid.a") is False       # duplicate rejected
+    assert d.is_new("") is True               # empty id never blocks
+    k, v, nx, px = spy.calls[0]
+    assert k == "hermes:wa:dedup:wamid.a" and v == "1"
+    assert nx is True and px == 60_000        # SET key 1 NX PX ttl
+
+
+def test_hardening_signature_fail_closed_and_sim_barred_in_prod():
+    """Pin: (a) empty app secret can never validate a signature; (b) prod
+    refuses to start without WHATSAPP_APP_SECRET; (c) prod refuses a SIM
+    send client (no access token / phone id)."""
+    from hermes.gateway.whatsapp import verify_signature
+    body = _payload("hi")
+    assert not verify_signature("", body, _sig(body))
+    assert not verify_signature(SECRET, body, "")
+    assert not verify_signature(SECRET, body, "sha1=deadbeef")
+    with pytest.raises(RuntimeError):
+        create_app(Settings(profile="prod", auth_mode="dev",
+                            whatsapp_app_secret=""))
+    with pytest.raises(RuntimeError):
+        # secret present but send client would run SIM (no access token)
+        create_app(Settings(profile="prod", auth_mode="dev",
+                            whatsapp_app_secret=SECRET,
+                            whatsapp_access_token="",
+                            whatsapp_phone_number_id=""))
+
+
 def test_sim_token_issuer_logs(caplog):
     import logging as _log
     with caplog.at_level(_log.INFO, logger="hermes.whatsapp"):

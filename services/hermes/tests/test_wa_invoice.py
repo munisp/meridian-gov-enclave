@@ -13,6 +13,7 @@ from fastapi.testclient import TestClient
 from hermes.config import Settings
 from hermes.gateway.main import create_app
 from hermes.gateway.wa_invoice import (EinvoicingClient, EinvoicingError,
+                                       content_idempotency_key,
                                        parse_amount_kobo)
 from hermes.gateway.wa_onboarding import compute_tin_check_digit
 from hermes.gateway.whatsapp import WhatsAppClient
@@ -71,25 +72,49 @@ class WaRecorder:
 
 class EinvTransport:
     """Mocked einvoicing HTTP boundary. records requests; mode controls the
-    response: ok | fail | notfound."""
+    response: ok | fail | reject | flaky | notfound.
+
+    fail  = ambiguous network/timeout error on every call.
+    reject = definitive 4xx-style rejection (ambiguous=False).
+    flaky = first create_invoice times out (ambiguous) AFTER the service
+            created the invoice; the retry with the same idempotency key
+            replays the stored invoice (backend dedup)."""
     def __init__(self, mode="ok"):
         self.mode = mode
         self.requests = []   # (url, headers, payload)
+        self.created = {}    # idempotency-key -> stored invoice (dedup)
 
     def __call__(self, url, headers, body, timeout_s):
         payload = json.loads(body.decode())
         self.requests.append((url, dict(headers), payload))
         if self.mode == "fail":
             raise EinvoicingError("einvoicing service unreachable: TimeoutError")
+        if self.mode == "reject":
+            raise EinvoicingError(
+                "einvoicing service rejected the request: HTTP 400 "
+                "(buyer TIN not on NRS registry)", ambiguous=False)
         if payload.get("irn") and len(payload) == 1:
             if self.mode == "notfound":
                 return {}
             return {"irn": payload["irn"], "status": "CONFIRMED",
                     "payment_status": "PAID",
                     "qr": {"payload": QR_PAYLOAD}}
-        return {"irn": IRN, "status": "CONFIRMED", "invoice_id": "inv-1",
-                "payment_status": "PENDING",
-                "qr": {"payload": QR_PAYLOAD, "signature": "ab12cd34ef56"}}
+        key = headers.get("idempotency-key", "")
+        if key and key in self.created:
+            inv = dict(self.created[key])
+            inv["idempotent_replay"] = True
+            return inv
+        inv = {"irn": IRN, "status": "CONFIRMED", "invoice_id": "inv-1",
+               "payment_status": "PENDING",
+               "qr": {"payload": QR_PAYLOAD, "signature": "ab12cd34ef56"}}
+        if key:
+            self.created[key] = inv
+        if self.mode == "flaky" and len(self.created) == 1 and \
+                not getattr(self, "_flaked", False):
+            # timeout AFTER the invoice was created server-side
+            self._flaked = True
+            raise EinvoicingError("einvoicing service unreachable: TimeoutError")
+        return inv
 
 
 def make(mode="ok", enabled=True, profile="dev", seed=True, wa_id=WA_ID):
@@ -164,8 +189,9 @@ def test_full_issue_flow():
     url, headers, payload = einv_rec.requests[0]
     assert url == "http://einv.test/v1/invoices/nrs"
     assert headers["authorization"] == "Bearer svc-token"
-    # key pinned to the stable Meta message id that started the flow
-    assert headers["idempotency-key"] == f"wa-invoice:{WA_ID}:wamid.2"
+    # key derived deterministically from the stable invoice content
+    assert headers["idempotency-key"] == content_idempotency_key(
+        WA_ID, SUPPLIER_TIN, BUYER_TIN, 15000000, "Consulting services March")
     # kobo integers internally, exact decimal NGN on the wire
     assert payload["legal_monetary_total"]["payable_amount"] == 150000.00
     assert payload["invoice_line"][0]["line_extension_amount"] == 150000.00
@@ -220,7 +246,8 @@ def test_redelivered_messages_never_duplicate():
     post(c, _msg_payload(mid="s6", button_id="inv_confirm_go"))  # redelivery
     assert len(einv_rec.requests) == 1
     _, headers, _ = einv_rec.requests[0]
-    assert headers["idempotency-key"] == f"wa-invoice:{WA_ID}:s2"
+    assert headers["idempotency-key"] == content_idempotency_key(
+        WA_ID, SUPPLIER_TIN, BUYER_TIN, 500000, "Supplies")
 
 
 def test_double_confirm_replays_same_idempotency_key():
@@ -284,15 +311,135 @@ def test_prod_missing_config_logs_error(caplog):
 
 
 # ---------------------------------------------------------------------------
-# honesty on upstream failure
+# honesty + idempotency on upstream failure (S3#4 regression)
 # ---------------------------------------------------------------------------
-def test_upstream_failure_honest_error_no_fake_confirmation():
-    c, wa_rec, einv_rec = make(mode="fail")
+def test_definitive_rejection_honest_error_no_fake_confirmation():
+    """A definitive 4xx proves nothing was created: the flow + idempotency
+    key are cleared and the user is told no invoice exists."""
+    c, wa_rec, einv_rec = make(mode="reject")
     run_full_issue_flow(c, wa_rec, einv_rec)
     final = wa_rec.texts()[-1]
     assert "could NOT issue" in final
     assert "No invoice was created" in final
     assert IRN not in final and "NRS1|" not in final  # nothing fabricated
+    # flow was reset: the next "invoice" command starts a brand-new flow
+    # whose content-derived key differs because the CONTENT differs.
+    post(c, _msg_payload("invoice", mid="r7"))
+    post(c, _msg_payload(mid="r8", button_id="inv_new"))
+    post(c, _msg_payload(BUYER_TIN, mid="r9"))
+    post(c, _msg_payload("5000", mid="r10"))
+    post(c, _msg_payload("Supplies", mid="r11"))
+    c2_mode = einv_rec.mode
+    einv_rec.mode = "ok"
+    post(c, _msg_payload(mid="r12", button_id="inv_confirm_go"))
+    einv_rec.mode = c2_mode
+    keys = [h.get("idempotency-key") for _, h, p in einv_rec.requests
+            if not (p.get("irn") and len(p) == 1)]
+    assert keys[-1] == content_idempotency_key(
+        WA_ID, SUPPLIER_TIN, BUYER_TIN, 500000, "Supplies")
+    assert keys[-1] != keys[0]
+
+
+def test_ambiguous_timeout_preserves_key_retry_single_invoice():
+    """Timeout AFTER the service created the invoice: the bot must NOT say
+    'no invoice was created', must PRESERVE the pinned idempotency key, and
+    the retry must reuse the SAME key so the backend dedups — exactly one
+    real invoice ever exists for the sale."""
+    c, wa_rec, einv_rec = make(mode="flaky")
+    post(c, _msg_payload("invoice", mid="s1"))
+    post(c, _msg_payload(mid="s2", button_id="inv_new"))
+    post(c, _msg_payload(BUYER_TIN, mid="s3"))
+    post(c, _msg_payload("150,000.00", mid="s4"))
+    post(c, _msg_payload("Consulting services March", mid="s5"))
+    post(c, _msg_payload(mid="s6", button_id="inv_confirm_go"))
+    # ambiguous outcome: honest "status being confirmed", NOT a false
+    # "no invoice was created"; nothing fabricated either way. The reply
+    # is sent with retry buttons (interactive payload).
+    interactives = [p for p in wa_rec.payloads if p.get("type") == "interactive"]
+    ambiguous_reply = interactives[-1]["interactive"]["body"]["text"]
+    assert "being confirmed" in ambiguous_reply
+    assert "may already have been issued" in ambiguous_reply
+    assert "No invoice was created" not in ambiguous_reply
+    assert IRN not in ambiguous_reply and "NRS1|" not in ambiguous_reply
+    # the flow is still alive at confirm: retry buttons were offered.
+    assert "inv_confirm_go" in wa_rec.buttons()
+    # retry (new Meta message id): SAME idempotency key reused; backend
+    # replays the already-created invoice — no duplicate is minted.
+    post(c, _msg_payload(mid="s7", button_id="inv_confirm_go"))
+    create_keys = [h.get("idempotency-key") for _, h, p in einv_rec.requests
+                   if not (p.get("irn") and len(p) == 1)]
+    assert create_keys == [content_idempotency_key(
+        WA_ID, SUPPLIER_TIN, BUYER_TIN, 15000000,
+        "Consulting services March")] * 2
+    assert len(einv_rec.created) == 1            # single real invoice
+    final = wa_rec.texts()[-1]
+    assert "E-invoice issued" in final and IRN in final
+    assert "already issued" in final             # idempotent replay surfaced
+
+
+def test_cancel_then_new_flow_same_content_dedups_at_backend():
+    """V2 residual (CONFIRMED): after an ambiguous failure the user CANCels
+    and starts a brand-new flow for the same sale -> same content-derived
+    idempotency key -> the BACKEND dedups; the created count stays 1 and
+    the existing invoice is surfaced as 'already issued'."""
+    c, wa_rec, einv_rec = make(mode="flaky")
+    # first flow: ambiguous timeout AFTER the service created the invoice
+    post(c, _msg_payload("invoice", mid="n1"))
+    post(c, _msg_payload(mid="n2", button_id="inv_new"))
+    post(c, _msg_payload(BUYER_TIN, mid="n3"))
+    post(c, _msg_payload("150,000.00", mid="n4"))
+    post(c, _msg_payload("Consulting services March", mid="n5"))
+    post(c, _msg_payload(mid="n6", button_id="inv_confirm_go"))
+    assert len(einv_rec.created) == 1
+    # user cancels instead of retrying...
+    post(c, _msg_payload(mid="n7", button_id="inv_confirm_no"))
+    assert "cancelled" in wa_rec.texts()[-1].lower()
+    # ...then starts a BRAND-NEW flow (new Meta message ids) for the same sale
+    post(c, _msg_payload("invoice", mid="m1"))
+    post(c, _msg_payload(mid="m2", button_id="inv_new"))
+    post(c, _msg_payload(BUYER_TIN, mid="m3"))
+    post(c, _msg_payload("150,000.00", mid="m4"))
+    post(c, _msg_payload("Consulting services March", mid="m5"))
+    post(c, _msg_payload(mid="m6", button_id="inv_confirm_go"))
+    # backend deduped: still exactly ONE real invoice, same key both times
+    assert len(einv_rec.created) == 1
+    keys = [h.get("idempotency-key") for _, h, p in einv_rec.requests
+            if not (p.get("irn") and len(p) == 1)]
+    expected = content_idempotency_key(WA_ID, SUPPLIER_TIN, BUYER_TIN,
+                                       15000000, "Consulting services March")
+    assert keys == [expected, expected]
+    # the replay is surfaced honestly as already issued (with the IRN)
+    final = wa_rec.texts()[-1]
+    assert "E-invoice issued" in final and "already issued" in final
+    assert IRN in final
+
+
+def test_new_flow_different_content_mints_distinct_key():
+    """Genuinely different sales must NOT dedup: different amount/description
+    or buyer hashes to a different idempotency key."""
+    base = content_idempotency_key(WA_ID, SUPPLIER_TIN, BUYER_TIN,
+                                   15000000, "Consulting services March")
+    assert base.startswith(f"wa-invoice:{WA_ID}:")
+    assert base != content_idempotency_key(
+        WA_ID, SUPPLIER_TIN, BUYER_TIN, 15000001, "Consulting services March")
+    assert base != content_idempotency_key(
+        WA_ID, SUPPLIER_TIN, BUYER_TIN, 15000000, "Consulting services April")
+    assert base != content_idempotency_key(
+        WA_ID, BUYER_TIN, SUPPLIER_TIN, 15000000, "Consulting services March")
+    # canonicalisation: case/whitespace noise in the description dedups
+    assert base == content_idempotency_key(
+        WA_ID, SUPPLIER_TIN, BUYER_TIN, 15000000,
+        "  Consulting   Services MARCH ")
+
+
+def test_ambiguous_failure_then_cancel_keeps_no_stale_charge():
+    """After an ambiguous failure the user may cancel; no second upstream
+    call is made and nothing was ever confirmed to them."""
+    c, wa_rec, einv_rec = make(mode="fail")
+    run_full_issue_flow(c, wa_rec, einv_rec)
+    post(c, _msg_payload(mid="c9", button_id="inv_confirm_no"))
+    assert "cancelled" in wa_rec.texts()[-1].lower()
+    assert len(einv_rec.requests) == 1
 
 
 def test_status_flow_and_failure():
