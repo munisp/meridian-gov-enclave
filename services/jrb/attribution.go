@@ -93,10 +93,12 @@ func LoadAttributionFormula(packsDir string) *AttributionFormula {
 			cons = v
 		}
 	}
-	// Fail closed: a pack whose weights do not partition 100% exactly is
-	// rejected in favour of the statutory constants — a mis-summing pack
-	// must never silently scale state allocations.
-	if eq+pop+cons != 10000 {
+	// Fail closed: a pack whose weights do not partition 100% exactly, or
+	// that carries ANY negative weight, is rejected in favour of the
+	// statutory constants — a mis-summing pack must never silently scale
+	// state allocations, and a negative limb (e.g. 11000/-500/-500, which
+	// still sums to 10000) must never produce negative state portions.
+	if eq < 0 || pop < 0 || cons < 0 || eq+pop+cons != 10000 {
 		return f
 	}
 	f.EqualityWeightBps, f.PopulationWeightBps, f.PlaceOfConsumptionWeightBps = eq, pop, cons
@@ -305,7 +307,7 @@ func Verify(doc *SignedFeedDoc) bool {
 		return false
 	}
 	sig, err := hex.DecodeString(doc.Signature)
-	if err != nil {
+	if err != nil || len(sig) != ed25519.SignatureSize {
 		return false
 	}
 	return ed25519.Verify(ed25519.PublicKey(pub), doc.Feed, sig)
