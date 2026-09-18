@@ -69,9 +69,11 @@ customs products    adapters, NTAA       deposits (500),  tin-graph, ledger,
   responder + secretariat; ANY fourth party hard-denied — proven in tests).
 - Per-state adapter framework (`StateAdapter`) with `lagos_lirs` and `fct_irs`
   reference adapters (simulated) + generic fallback covering all states.
-- **Attribution feed builder**: NTAA 30% place-of-consumption from
-  `rp-attribution-formula` (embedded fallback pack), residual 70% split
-  equality/derivation; ed25519-signed output; gateway F7 verifies before serving.
+- **Attribution feed builder**: gazetted NTAA 2025 horizontal attribution —
+  50% equality / 20% population / 30% place-of-consumption (no derivation
+  limb) — from `rp-attribution-formula` (embedded fallback pack carries the
+  same statutory constants; effective-dated 2026-01, mis-summing packs fail
+  closed); ed25519-signed output; gateway F7 verifies before serving.
 - `wf-jrb-onboard|route|reconcile|eoi|joint-audit|cert-rotate|single-filing|attribution-publish`.
 - Cross-zone sends **only** via enclave-gateway F6 with WORM receipt capture
   (`GatewayClient`); local simulated receipt when gateway unset (tagged).
