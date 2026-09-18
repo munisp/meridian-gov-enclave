@@ -13,14 +13,18 @@ step-by-step collection with explicit confirm), hardened to enclave rules:
   round-half-up — no float noise is ever produced here).
 - Status flow: "status" -> IRN prompt -> POST /v1/invoices/nrs {"irn": ...}
   (the service's idempotent IRN lookup replays the stored invoice).
-- Idempotency: the issue flow's Idempotency-Key is derived from the wa_id +
-  the Meta message id that STARTED the flow (Meta message ids are stable
-  across redelivery) and pinned in the session for the whole conversation —
-  a double-confirm or webhook redelivery can never create a second invoice.
-  On AMBIGUOUS upstream outcomes (timeout / network / 5xx) the pinned key is
-  PRESERVED and the user is told the status is being confirmed — the retry
-  re-issues with the SAME key so the backend dedups; only a definitive 4xx
-  rejection clears the key.
+- Idempotency: the issue flow's Idempotency-Key is derived DETERMINISTICALLY
+  from the stable invoice content (tenant=supplier TIN + wa phone + buyer
+  reference + amount + line description hash) and pinned in the session for
+  the whole conversation — a double-confirm, webhook redelivery, OR a
+  cancel-then-start-a-new-flow for the same sale can never create a second
+  invoice: the new flow recomputes the SAME key and the backend dedups it
+  (the NRS payload's buyer_reference carries the same key, so a backend
+  uniqueness constraint on (tenant, buyer_reference) dedups too — belt and
+  braces). On AMBIGUOUS upstream outcomes (timeout / network / 5xx) the
+  pinned key is PRESERVED and the user is told the status is being
+  confirmed — the retry re-issues with the SAME key so the backend dedups;
+  only a definitive 4xx rejection clears the key.
 - Honesty: any upstream failure (network, non-2xx, malformed response) yields
   an honest error reply; a confirmation/IRN is NEVER fabricated, and "no
   invoice was created" is only asserted on definitive 4xx rejections.
@@ -31,6 +35,7 @@ step-by-step collection with explicit confirm), hardened to enclave rules:
 """
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
 import re
@@ -197,6 +202,26 @@ class EinvoicingClient:
         """Idempotent IRN lookup: POST {"irn": ...} replays the stored
         invoice (service-side GetByIRN before schema validation)."""
         return self._post_nrs({"irn": irn})
+
+
+def content_idempotency_key(wa_id: str, supplier_tin: str, buyer_tin: str,
+                            amount_kobo: int, description: str) -> str:
+    """Deterministic idempotency key derived from the stable invoice content:
+    tenant (supplier TIN) + phone (wa_id) + buyer reference + amount +
+    line-description hash. Two DIFFERENT conversations for the SAME sale
+    (e.g. cancel after an ambiguous failure, then a brand-new flow)
+    recompute the SAME key, so the einvoicing backend dedups them to a
+    single real invoice; genuinely different sales hash differently.
+    Format keeps the wa-invoice:{wa_id}:... braces shape."""
+    canon = "|".join([
+        supplier_tin.strip().upper(),
+        wa_id.strip(),
+        buyer_tin.strip().upper(),
+        str(int(amount_kobo)),
+        " ".join(description.split()).lower(),
+    ])
+    digest = hashlib.sha256(canon.encode()).hexdigest()[:32]
+    return f"wa-invoice:{wa_id}:{digest}"
 
 
 def parse_amount_kobo(text: str) -> Optional[int]:
@@ -388,10 +413,10 @@ class InvoiceFlow:
             self.wa.send_text(wa_id, UNBOUND_TEXT)
             return True
         self._reset(st)
-        # Durable idempotency key: conversation (wa_id) + the stable Meta
-        # message id that started this flow. Pinned for the whole flow so a
-        # redelivery or double-confirm can never create a second invoice.
-        st[_ST_IDEM] = f"wa-invoice:{wa_id}:{msg_id}"
+        # The durable idempotency key is pinned at confirm time, derived
+        # deterministically from the collected invoice CONTENT (see
+        # content_idempotency_key) — not from the starting message id — so
+        # a cancel + brand-new flow for the same sale dedups at the backend.
         st[_ST_STATE] = "buyer_tin"
         self._save(wa_id, st)
         self.wa.send_text(wa_id, "New e-invoice — Step 1 of 3.\n\n"
@@ -417,13 +442,19 @@ class InvoiceFlow:
         buyer_tin = st.get(_ST_BUYER, "")
         kobo = st.get(_ST_KOBO)
         desc = st.get(_ST_DESC, "")
-        idem = st.get(_ST_IDEM, "")
-        if not (supplier_tin and buyer_tin and kobo and desc and idem):
+        if not (supplier_tin and buyer_tin and kobo and desc):
             self._reset(st)
             self._save(wa_id, st)
             self.wa.send_text(wa_id, "That invoice session has expired. Send "
                                      "INVOICE to start again.")
             return True
+        # Content-derived idempotency key, pinned in the session: a retry
+        # within this flow reuses it, and a NEW flow for the SAME sale
+        # recomputes the SAME key so the backend dedups (V2 residual:
+        # cancel -> start-new-flow must not mint a second real invoice).
+        idem = content_idempotency_key(wa_id, supplier_tin, buyer_tin,
+                                       int(kobo), desc)
+        st[_ST_IDEM] = idem
         try:
             resp = self.client.create_invoice(
                 supplier_tin=supplier_tin, buyer_tin=buyer_tin,
