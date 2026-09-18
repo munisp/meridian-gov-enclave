@@ -24,6 +24,16 @@ CREATE TABLE IF NOT EXISTS tcc_docs(
     doc JSONB NOT NULL,
     updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
     PRIMARY KEY (collection, id));
+-- R4-9b: at most ONE revocation audit record per certificate, enforced at
+-- the database (cross-replica): the per-process store lock and the
+-- conditional-UPDATE CAS serialise only within one process. The legacy
+-- single-document trail (id='audit') has no top-level certificate_id key
+-- and is excluded by the partial predicate, so pre-existing data migrates
+-- cleanly. Idempotent, applied at startup like the table DDL (this repo's
+-- migration convention: auto-applied IF NOT EXISTS DDL, no external files).
+CREATE UNIQUE INDEX IF NOT EXISTS tcc_revocations_cert_uniq
+    ON tcc_docs ((doc->>'certificate_id'))
+    WHERE collection = 'tcc_revocations' AND doc ? 'certificate_id';
 """
 
 _UPSERT = ("INSERT INTO tcc_docs(collection, id, doc, updated_at) "
@@ -106,9 +116,18 @@ class _PostgresBackend:
         return [dict(r[0]) for r in rows]
 
     def put_if_absent(self, coll: str, rid: str, doc: dict) -> bool:
-        with self.conn.cursor() as cur:
-            cur.execute(_INSERT_IF_ABSENT, (coll, rid, json.dumps(doc)))
-            return cur.rowcount == 1
+        import psycopg  # psycopg[binary], lazy as in __init__
+        try:
+            with self.conn.cursor() as cur:
+                cur.execute(_INSERT_IF_ABSENT, (coll, rid, json.dumps(doc)))
+                return cur.rowcount == 1
+        except psycopg.IntegrityError:
+            # ON CONFLICT DO NOTHING already absorbs (collection, id) PK
+            # conflicts; this covers a conflict on the R4-9b partial unique
+            # index (tcc_revocations_cert_uniq) raised by a concurrent
+            # transaction's in-flight insert. Semantically identical: the
+            # record slot is taken, this caller did not create it.
+            return False
 
     def update_where_ne(self, coll: str, rid: str, doc: dict,
                         field: str, disallowed: str) -> bool:

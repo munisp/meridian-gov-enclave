@@ -131,7 +131,22 @@ class TccStore:
             rid = f"{certificate_id}:{new_ulid()}"
             if self._docs.put_if_absent("tcc_revocations", rid, entry):
                 return cert
+        # R4-9b: the tcc_revocations_cert_uniq partial UNIQUE index enforces
+        # at most one revocation record per cert at the DATABASE layer. When
+        # inserts keep failing because that slot is taken, a concurrent
+        # revoke already recorded this certificate — report 409 (the CAS
+        # above is the first-line serialiser; this is the cross-replica
+        # integrity backstop), never a misleading 500.
+        if self.revocation_for(certificate_id) is not None:
+            raise TccError("certificate already revoked")
         raise TccError("revocation audit trail write failed")
+
+    def revocation_for(self, certificate_id: str) -> dict | None:
+        """The revocation audit record for a cert, if one exists."""
+        for d in self._docs.scan("tcc_revocations"):
+            if d.get("certificate_id") == certificate_id:
+                return d
+        return None
 
     def revocations(self) -> list[dict]:
         out = []
