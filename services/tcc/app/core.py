@@ -18,6 +18,7 @@ from __future__ import annotations
 import datetime as dt
 
 from . import store
+from .util import new_ulid
 
 
 class TccError(ValueError):
@@ -100,6 +101,50 @@ class TccStore:
 
     def cert(self, certificate_id: str) -> dict | None:
         return self._docs.get("tcc_certs", certificate_id)
+
+    def revoke_cert(self, certificate_id: str, *, reason: str,
+                    revoked_by: str, now: str) -> dict:
+        """Revoke an issued certificate (NTAA s.72: a TCC obtained/issued in
+        error must not remain verifiable). Marks the cert revoked, records
+        who/why/when on the cert, and appends to the durable revocation
+        audit trail. Certs issued before this field existed have no
+        ``status`` key and are treated as active."""
+        cert = self._docs.get("tcc_certs", certificate_id)
+        if cert is None:
+            raise TccError("unknown certificate")
+        cert["status"] = "revoked"
+        cert["revocation"] = {"reason": reason, "revoked_by": revoked_by,
+                              "revoked_at": now}
+        # Atomic state transition (conditional UPDATE on Postgres, lock-
+        # spanned CAS in memory): exactly one concurrent revoke wins; the
+        # loser gets 409 instead of a silent double-200.
+        if not self._docs.update_where_ne("tcc_certs", certificate_id, cert,
+                                          "status", "revoked"):
+            raise TccError("certificate already revoked")
+        # Append-only audit trail: one durable record per revocation, keyed
+        # by cert id + ULID. No read-modify-write of a shared document, so
+        # concurrent revocations of different certs can never lose entries.
+        entry = {"certificate_id": certificate_id, "tin": cert["tin"],
+                 "reason": reason, "revoked_by": revoked_by,
+                 "revoked_at": now}
+        for _ in range(5):  # ULID collision is practically impossible
+            rid = f"{certificate_id}:{new_ulid()}"
+            if self._docs.put_if_absent("tcc_revocations", rid, entry):
+                return cert
+        raise TccError("revocation audit trail write failed")
+
+    def revocations(self) -> list[dict]:
+        out = []
+        # Legacy single-document trail (pre-append-only): fold in, then it
+        # is never written again.
+        legacy = self._docs.get("tcc_revocations", "audit")
+        if legacy:
+            out.extend(legacy.get("entries", []))
+        out.extend(d for d in self._docs.scan("tcc_revocations")
+                   if "certificate_id" in d)
+        out.sort(key=lambda e: (e.get("revoked_at", ""),
+                                e.get("certificate_id", "")))
+        return out
 
     def sla_breaches(self, now: str, sla_days: int) -> list[dict]:
         out = []

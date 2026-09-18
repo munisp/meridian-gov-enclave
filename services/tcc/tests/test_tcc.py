@@ -58,6 +58,7 @@ def test_issue_signed_verifiable_certificate():
     assert dec.status_code == 200
     body = dec.json()
     assert body["status"] == "issued"
+    assert body["status"] == "issued"
     assert body["ledger_mode"] == "sim"
     cert = client.get(f"/v1/tcc/{body['certificate_id']}", headers=H).json()
     assert cert["statute"] == "NTAA 2025 s.72"
@@ -128,3 +129,87 @@ def test_unknown_ids_404_problem_json():
     assert r.status_code == 404
     assert r.headers["content-type"].startswith("application/problem+json")
     assert client.get("/v1/tcc/verify/NOPE").status_code == 404
+
+
+# ---------------------------------------------------------------------------
+# Revocation (R4 S1b#4): admin-only, reason + audit trail, public verify
+# immediately reports revoked
+# ---------------------------------------------------------------------------
+HA = {"X-Dev-Role": "admin"}
+HAUD = {"X-Dev-Role": "auditor"}
+
+
+def _issue(tin, key):
+    rec = _apply(tin, key)
+    dec = client.post(f"/v1/tcc/applications/{rec['application_id']}/decide",
+                      headers=H)
+    assert dec.json()["status"] == "issued"
+    return dec.json()["certificate_id"]
+
+
+def test_revoked_certificate_fails_public_verification():
+    cert_id = _issue(TIN_OK, "k-rev-verify")
+    assert client.get(f"/v1/tcc/verify/{cert_id}").json()["valid"] is True
+    r = client.post(f"/v1/tcc/{cert_id}/revoke",
+                    json={"reason": "issued in error: liability found"},
+                    headers=HA)
+    assert r.status_code == 200
+    body = r.json()
+    assert body["status"] == "revoked"
+    assert body["revocation"]["revoked_by"] == "dev-admin"
+    # public verification (no auth) now reports revoked + invalid even
+    # though the ed25519 signature itself still verifies
+    v = client.get(f"/v1/tcc/verify/{cert_id}")
+    assert v.status_code == 200
+    vb = v.json()
+    assert vb["valid"] is False
+    assert vb["status"] == "revoked"
+    assert vb["signature_valid"] is True
+    assert vb["revocation"]["reason"].startswith("issued in error")
+
+
+def test_revoke_requires_admin_reason_and_is_audited():
+    cert_id = _issue(TIN_OK, "k-rev-authz")
+    # operator cannot revoke
+    assert client.post(f"/v1/tcc/{cert_id}/revoke",
+                       json={"reason": "fraudulent disclosures"},
+                       headers=H).status_code == 403
+    # unauthenticated cannot revoke
+    assert client.post(f"/v1/tcc/{cert_id}/revoke",
+                       json={"reason": "fraudulent disclosures"}
+                       ).status_code == 401
+    # a reason is mandatory
+    assert client.post(f"/v1/tcc/{cert_id}/revoke", json={"reason": ""},
+                       headers=HA).status_code == 422
+    # unknown certificate
+    assert client.post("/v1/tcc/CERT-nope/revoke",
+                       json={"reason": "test reason"},
+                       headers=HA).status_code == 404
+    # success: cert record carries status + revocation metadata
+    assert client.post(f"/v1/tcc/{cert_id}/revoke",
+                       json={"reason": "fraudulent disclosures"},
+                       headers=HA).status_code == 200
+    cert = client.get(f"/v1/tcc/{cert_id}", headers=H).json()
+    assert cert["status"] == "revoked"
+    assert cert["revocation"]["revoked_by"] == "dev-admin"
+    assert cert["revocation"]["reason"] == "fraudulent disclosures"
+    # double revocation rejected
+    assert client.post(f"/v1/tcc/{cert_id}/revoke",
+                       json={"reason": "again please"},
+                       headers=HA).status_code == 409
+    # durable audit trail visible to admin and auditor, not operator
+    trail = client.get("/v1/tcc/audit/revocations", headers=HA).json()
+    assert any(e["certificate_id"] == cert_id for e in trail["revocations"])
+    assert client.get("/v1/tcc/audit/revocations",
+                      headers=HAUD).status_code == 200
+    assert client.get("/v1/tcc/audit/revocations",
+                      headers=H).status_code == 403
+
+
+def test_active_certificates_unaffected_by_other_revocations():
+    a = _issue(TIN_OK, "k-rev-a")
+    b = _issue(TIN_OK, "k-rev-b")
+    client.post(f"/v1/tcc/{a}/revoke", json={"reason": "test revocation"},
+                headers=HA)
+    vb = client.get(f"/v1/tcc/verify/{b}").json()
+    assert vb["valid"] is True and vb["status"] == "active"

@@ -3,11 +3,15 @@
 Eligibility = no outstanding liabilities (rev360/ledger adapter,
 fail-closed prod, sim tagged) + 3-year disclosure coverage. Two-week
 statutory SLA with breach alerts. Certificates are ed25519-signed with a
-QR-verifiable ID; GET /v1/tcc/verify/{id} is public.
+QR-verifiable ID; GET /v1/tcc/verify/{id} is public. Admin revocation
+invalidates a certificate at the registry level (public verify reports
+revoked) with a durable reason+actor audit trail.
 
 REAL/SIM tags: see app/ledger.py (ledger) and app/certs.py (key mode).
 """
 from __future__ import annotations
+
+import logging
 
 from fastapi import FastAPI, Request
 from pydantic import BaseModel
@@ -19,6 +23,7 @@ from .key_provider import KeyProviderUnavailable, build_signer
 from .util import new_ulid, now_rfc3339, principal_from, problem
 
 settings = get_settings()
+log = logging.getLogger("tcc")
 app = FastAPI(title="Meridian Gov-Enclave TCC", version=settings.version)
 
 # OTel bootstrap (DESIGN-CONTRACT.md): fail-soft, never breaks startup or
@@ -151,15 +156,65 @@ def get_certificate(certificate_id: str):
     return cert
 
 
+class RevokeIn(BaseModel):
+    reason: str
+
+
+@app.post("/v1/tcc/{certificate_id}/revoke")
+def revoke_certificate(certificate_id: str, body: RevokeIn, request: Request):
+    """Admin-only revocation of an issued certificate. Records reason,
+    actor and timestamp on the certificate and in a durable revocation
+    audit trail; public verification immediately reports the certificate
+    as revoked (valid=false) even though its signature still verifies —
+    revocation is a registry fact, not a cryptographic one."""
+    principal = getattr(request.state, "principal", None) or {}
+    if "admin" not in principal.get("roles", []):
+        return problem(403, "Forbidden",
+                       "certificate revocation requires the admin role")
+    reason = (body.reason or "").strip()
+    if len(reason) < 5:
+        return problem(422, "Invalid revocation",
+                       "a revocation reason (at least 5 characters) is required")
+    try:
+        cert = store.revoke_cert(certificate_id, reason=reason,
+                                 revoked_by=principal.get("sub", "unknown"),
+                                 now=now_rfc3339())
+    except core.TccError as exc:
+        msg = str(exc)
+        if "unknown" in msg:
+            return problem(404, "Not found", msg)
+        return problem(409, "Already revoked", msg)
+    log.warning("tcc revoked cert=%s by=%s reason=%s",
+                certificate_id, principal.get("sub"), reason)
+    return {"certificate_id": certificate_id, "status": "revoked",
+            "revocation": cert["revocation"]}
+
+
+@app.get("/v1/tcc/audit/revocations")
+def revocation_audit_trail(request: Request):
+    """Durable revocation audit trail (admin/auditor)."""
+    principal = getattr(request.state, "principal", None) or {}
+    if not ({"admin", "auditor"} & set(principal.get("roles", []))):
+        return problem(403, "Forbidden", "admin or auditor role required")
+    return {"revocations": store.revocations()}
+
+
 @app.get("/v1/tcc/verify/{certificate_id}")
 def verify_certificate(certificate_id: str):
     """Public verification: recompute signature over the certified
-    disclosure and compare. No auth (SPEC: verifiable by MDAs/banks)."""
+    disclosure and compare. No auth (SPEC: verifiable by MDAs/banks).
+    A REVOKED certificate always reports valid=false with status=revoked,
+    regardless of signature validity."""
     cert = store.cert(certificate_id)
     if cert is None:
         return problem(404, "Not found", "unknown certificate")
-    ok = signer.verify(cert, cert["signature_b64"]) if signer else False
-    return {"certificate_id": certificate_id, "valid": ok,
+    status = cert.get("status", "active")
+    sig_ok = signer.verify(cert, cert["signature_b64"]) if signer else False
+    return {"certificate_id": certificate_id,
+            "valid": sig_ok and status != "revoked",
+            "status": status,
+            "signature_valid": sig_ok,
+            "revocation": cert.get("revocation"),
             "tin": cert["tin"], "as_of": cert["as_of"],
             "qr_verification": cert["qr_verification"]}
 
