@@ -307,7 +307,7 @@ func Verify(doc *SignedFeedDoc) bool {
 		return false
 	}
 	sig, err := hex.DecodeString(doc.Signature)
-	if err != nil || len(sig) != ed25519.SignatureSize {
+	if err != nil {
 		return false
 	}
 	return ed25519.Verify(ed25519.PublicKey(pub), doc.Feed, sig)
