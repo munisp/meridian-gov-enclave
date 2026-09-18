@@ -101,6 +101,33 @@ class TccStore:
     def cert(self, certificate_id: str) -> dict | None:
         return self._docs.get("tcc_certs", certificate_id)
 
+    def revoke_cert(self, certificate_id: str, *, reason: str,
+                    revoked_by: str, now: str) -> dict:
+        """Revoke an issued certificate (NTAA s.72: a TCC obtained/issued in
+        error must not remain verifiable). Marks the cert revoked, records
+        who/why/when on the cert, and appends to the durable revocation
+        audit trail. Certs issued before this field existed have no
+        ``status`` key and are treated as active."""
+        cert = self._docs.get("tcc_certs", certificate_id)
+        if cert is None:
+            raise TccError("unknown certificate")
+        if cert.get("status", "active") == "revoked":
+            raise TccError("certificate already revoked")
+        cert["status"] = "revoked"
+        cert["revocation"] = {"reason": reason, "revoked_by": revoked_by,
+                              "revoked_at": now}
+        self._docs.put("tcc_certs", certificate_id, cert)
+        trail = self._docs.get("tcc_revocations", "audit") or {"entries": []}
+        trail["entries"].append({"certificate_id": certificate_id,
+                                 "tin": cert["tin"], "reason": reason,
+                                 "revoked_by": revoked_by, "revoked_at": now})
+        self._docs.put("tcc_revocations", "audit", trail)
+        return cert
+
+    def revocations(self) -> list[dict]:
+        trail = self._docs.get("tcc_revocations", "audit") or {"entries": []}
+        return list(trail["entries"])
+
     def sla_breaches(self, now: str, sla_days: int) -> list[dict]:
         out = []
         for rec in self._docs.scan("tcc_apps"):
