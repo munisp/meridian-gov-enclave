@@ -567,9 +567,9 @@ func (s *Server) dispatchWorkflow(name string, p map[string]any) (*WorkflowRun, 
 	return nil, &msg
 }
 
-// defaultAttributionInputs provides a dev consumption/derivation matrix across
+// defaultAttributionInputs provides a dev consumption/population matrix across
 // all 36 states + FCT (SIMULATED shares; production sources from the geo
-// attribution pipeline).
+// attribution pipeline and NBS population figures).
 func defaultAttributionInputs() []StateConsumptionInput {
 	var out []StateConsumptionInput
 	n := len(nigerianStates)
@@ -581,7 +581,7 @@ func defaultAttributionInputs() []StateConsumptionInput {
 			share += rem
 		}
 		out = append(out, StateConsumptionInput{
-			StateCode: st.Code, ConsumptionBps: share, DerivationBps: share,
+			StateCode: st.Code, ConsumptionBps: share, PopulationBps: share,
 		})
 	}
 	return out

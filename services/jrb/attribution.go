@@ -18,30 +18,55 @@ import (
 	"github.com/munisp/meridian-gov-enclave/packages/keyx/provider"
 )
 
-// AttributionFormula is the NTAA VAT attribution formula: 30% place of
-// consumption, residual 70% on equality + derivation. Loaded from the
-// rp-attribution-formula pack (embedded fallback keeps dev standalone).
+// AttributionFormula is the NTAA 2025 (gazetted) VAT horizontal attribution
+// formula for the states'/LGAs' share of the VAT pool:
+//
+//	50% equality + 20% population + 30% place of consumption.
+//
+// There is NO derivation limb in the gazetted NTAA formula (the earlier
+// 35/35 equality/derivation residual hardcode was wrong and has been
+// removed). Weights are loaded from the rp-attribution-formula pack when
+// available; the embedded fallback carries the same statutory constants so
+// dev stays standalone. A pack whose weights do not sum to 10000 bps is
+// rejected (fail closed to the statutory constants). The formula is
+// effective-dated: it applies only to periods on/after the pack's
+// effective_from; earlier periods are refused rather than computed with an
+// unverifiable formula.
 type AttributionFormula struct {
 	PackRef                     string
+	EqualityWeightBps           int
+	PopulationWeightBps         int
 	PlaceOfConsumptionWeightBps int
-	ResidualBps                 int
+	// EffectiveFrom is the first month (YYYY-MM) the formula governs,
+	// from the pack's effective_from date.
+	EffectiveFrom string
 }
+
+// statutoryWeights are the NTAA 2025 gazetted VAT attribution weights.
+const (
+	statutoryEqualityBps    = 5000
+	statutoryPopulationBps  = 2000
+	statutoryConsumptionBps = 3000
+)
 
 func LoadAttributionFormula(packsDir string) *AttributionFormula {
 	f := &AttributionFormula{
 		PackRef:                     "rp-attribution-formula@1.0.0",
-		PlaceOfConsumptionWeightBps: 3000,
-		ResidualBps:                 7000,
+		EqualityWeightBps:           statutoryEqualityBps,
+		PopulationWeightBps:         statutoryPopulationBps,
+		PlaceOfConsumptionWeightBps: statutoryConsumptionBps,
+		EffectiveFrom:               "2026-01",
 	}
 	path := filepath.Join(packsDir, "rp-attribution-formula", "1.0.0.yaml")
 	data, err := os.ReadFile(path)
 	if err != nil {
-		return f // embedded fallback
+		return f // embedded fallback (statutory constants)
 	}
 	var pack struct {
-		ID      string `yaml:"id"`
-		Version string `yaml:"version"`
-		Rules   []struct {
+		ID            string `yaml:"id"`
+		Version       string `yaml:"version"`
+		EffectiveFrom string `yaml:"effective_from"`
+		Rules         []struct {
 			ID   string         `yaml:"id"`
 			Then map[string]any `yaml:"then"`
 		} `yaml:"rules"`
@@ -50,27 +75,42 @@ func LoadAttributionFormula(packsDir string) *AttributionFormula {
 		return f
 	}
 	f.PackRef = fmt.Sprintf("%s@%s", pack.ID, pack.Version)
+	if len(pack.EffectiveFrom) >= 7 {
+		f.EffectiveFrom = pack.EffectiveFrom[:7]
+	}
+	eq, pop, cons := f.EqualityWeightBps, f.PopulationWeightBps, f.PlaceOfConsumptionWeightBps
 	for _, rule := range pack.Rules {
-		switch rule.ID {
-		case "attr.vat.state_share":
-			if v, ok := rule.Then["place_of_consumption_weight_bps"].(int); ok {
-				f.PlaceOfConsumptionWeightBps = v
-			}
-		case "attr.vat.residual":
-			if v, ok := rule.Then["residual_bps"].(int); ok {
-				f.ResidualBps = v
-			}
+		if rule.ID != "attr.vat.state_share" {
+			continue
+		}
+		if v, ok := rule.Then["equality_weight_bps"].(int); ok {
+			eq = v
+		}
+		if v, ok := rule.Then["population_weight_bps"].(int); ok {
+			pop = v
+		}
+		if v, ok := rule.Then["place_of_consumption_weight_bps"].(int); ok {
+			cons = v
 		}
 	}
+	// Fail closed: a pack whose weights do not partition 100% exactly, or
+	// that carries ANY negative weight, is rejected in favour of the
+	// statutory constants — a mis-summing pack must never silently scale
+	// state allocations, and a negative limb (e.g. 11000/-500/-500, which
+	// still sums to 10000) must never produce negative state portions.
+	if eq < 0 || pop < 0 || cons < 0 || eq+pop+cons != 10000 {
+		return f
+	}
+	f.EqualityWeightBps, f.PopulationWeightBps, f.PlaceOfConsumptionWeightBps = eq, pop, cons
 	return f
 }
 
-// StateConsumptionInput is a state's consumption and derivation shares (bps of
-// the national totals) for a period.
+// StateConsumptionInput is a state's population and consumption shares (bps
+// of the national totals) for a period.
 type StateConsumptionInput struct {
 	StateCode      string `json:"state_code"`
 	ConsumptionBps int    `json:"consumption_bps"`
-	DerivationBps  int    `json:"derivation_bps"`
+	PopulationBps  int    `json:"population_bps"`
 }
 
 // FeedState is one state's attributed VAT revenue row.
@@ -78,7 +118,7 @@ type FeedState struct {
 	StateCode              string `json:"state_code"`
 	ConsumptionPortionKobo int64  `json:"consumption_portion_kobo"`
 	EqualityPortionKobo    int64  `json:"equality_portion_kobo"`
-	DerivationPortionKobo  int64  `json:"derivation_portion_kobo"`
+	PopulationPortionKobo  int64  `json:"population_portion_kobo"`
 	TotalKobo              int64  `json:"total_kobo"`
 }
 
@@ -93,36 +133,46 @@ type AttributionFeed struct {
 	PackRef  string         `json:"pack_ref"`
 }
 
-// BuildAttributionFeed computes the feed. Consumption portion = 30% of pool
-// distributed by consumption shares; residual 70% split half equality (equal
-// per state) half derivation (by derivation shares). Integer kobo; rounding
-// remainders go to the largest consumption share state and the pool is
-// conserved exactly (test-proven).
+// BuildAttributionFeed computes the feed per the gazetted NTAA formula:
+// consumption portion = 30% of pool distributed by consumption shares;
+// population portion = 20% distributed by population shares; equality
+// portion = 50% shared equally per state. There is no derivation limb.
+// The formula is effective-dated: periods before the pack's effective_from
+// are refused (no gazetted formula in force to compute them with). Integer
+// kobo; rounding remainders go to the largest consumption share state and
+// the pool is conserved exactly (test-proven).
 func (f *AttributionFormula) BuildAttributionFeed(period string, poolKobo int64,
 	inputs []StateConsumptionInput) (*AttributionFeed, error) {
 	if poolKobo < 0 || len(inputs) == 0 {
 		return nil, errors.New("pool_kobo >= 0 and at least one state input required")
 	}
-	var cTot, dTot int
+	if f.EffectiveFrom != "" && period < f.EffectiveFrom {
+		return nil, fmt.Errorf("no gazetted NTAA attribution formula in force for "+
+			"period %q (formula effective from %s); refusing to compute",
+			period, f.EffectiveFrom)
+	}
+	var cTot, pTot int
 	seen := map[string]bool{}
 	for _, in := range inputs {
 		if in.StateCode == "" || seen[in.StateCode] {
 			return nil, fmt.Errorf("duplicate or empty state_code %q", in.StateCode)
 		}
 		seen[in.StateCode] = true
-		if in.ConsumptionBps < 0 || in.DerivationBps < 0 {
+		if in.ConsumptionBps < 0 || in.PopulationBps < 0 {
 			return nil, errors.New("shares must be non-negative bps")
 		}
 		cTot += in.ConsumptionBps
-		dTot += in.DerivationBps
+		pTot += in.PopulationBps
 	}
 	if cTot <= 0 {
 		return nil, errors.New("consumption shares must sum to > 0 bps")
 	}
+	if pTot <= 0 {
+		return nil, errors.New("population shares must sum to > 0 bps")
+	}
 	consPool := poolKobo * int64(f.PlaceOfConsumptionWeightBps) / 10000
-	residPool := poolKobo - consPool
-	eqPool := residPool / 2
-	derPool := residPool - eqPool
+	popPool := poolKobo * int64(f.PopulationWeightBps) / 10000
+	eqPool := poolKobo - consPool - popPool // 50%, remainder-safe
 	n := int64(len(inputs))
 
 	states := make([]FeedState, 0, len(inputs))
@@ -130,17 +180,14 @@ func (f *AttributionFormula) BuildAttributionFeed(period string, poolKobo int64,
 	largestIdx, largestShare := 0, -1
 	for i, in := range inputs {
 		cons := consPool * int64(in.ConsumptionBps) / int64(cTot)
+		pop := popPool * int64(in.PopulationBps) / int64(pTot)
 		eq := eqPool / n
-		var der int64
-		if dTot > 0 {
-			der = derPool * int64(in.DerivationBps) / int64(dTot)
-		}
 		st := FeedState{
 			StateCode:              in.StateCode,
 			ConsumptionPortionKobo: cons,
 			EqualityPortionKobo:    eq,
-			DerivationPortionKobo:  der,
-			TotalKobo:              cons + eq + der,
+			PopulationPortionKobo:  pop,
+			TotalKobo:              cons + eq + pop,
 		}
 		distributed += st.TotalKobo
 		if in.ConsumptionBps > largestShare {
@@ -158,8 +205,10 @@ func (f *AttributionFormula) BuildAttributionFeed(period string, poolKobo int64,
 		Period:   period,
 		PoolKobo: poolKobo,
 		Formula: map[string]any{
+			"equality_weight_bps":             f.EqualityWeightBps,
+			"population_weight_bps":           f.PopulationWeightBps,
 			"place_of_consumption_weight_bps": f.PlaceOfConsumptionWeightBps,
-			"residual_bps":                    f.ResidualBps,
+			"effective_from":                  f.EffectiveFrom,
 			"pack_ref":                        f.PackRef,
 		},
 		States:  states,

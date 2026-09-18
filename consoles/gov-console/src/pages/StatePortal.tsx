@@ -16,7 +16,7 @@ interface FeedState {
   state_code: string
   consumption_portion_kobo: number
   equality_portion_kobo: number
-  derivation_portion_kobo: number
+  population_portion_kobo: number
   total_kobo: number
 }
 
@@ -121,12 +121,12 @@ export default function StatePortal({ session }: { session: Session }) {
                 <dd className="font-semibold">{fmtKobo(attribution.consumption_portion_kobo)}</dd>
               </div>
               <div className="flex justify-between border-b border-neutral-100 pb-2">
-                <dt className="text-stone-600">Equality</dt>
+                <dt className="text-stone-600">Equality (50%)</dt>
                 <dd className="font-semibold">{fmtKobo(attribution.equality_portion_kobo)}</dd>
               </div>
               <div className="flex justify-between border-b border-neutral-100 pb-2">
-                <dt className="text-stone-600">Derivation</dt>
-                <dd className="font-semibold">{fmtKobo(attribution.derivation_portion_kobo)}</dd>
+                <dt className="text-stone-600">Population (20%)</dt>
+                <dd className="font-semibold">{fmtKobo(attribution.population_portion_kobo)}</dd>
               </div>
               <div className="flex justify-between pt-1">
                 <dt className="font-semibold">Total</dt>

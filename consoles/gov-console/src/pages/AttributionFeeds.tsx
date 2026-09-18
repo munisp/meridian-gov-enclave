@@ -6,7 +6,7 @@ interface FeedState {
   state_code: string
   consumption_portion_kobo: number
   equality_portion_kobo: number
-  derivation_portion_kobo: number
+  population_portion_kobo: number
   total_kobo: number
 }
 
@@ -68,7 +68,7 @@ export default function AttributionFeeds({ session }: { session: Session }) {
     <div>
       <PageTitle
         title="Attribution feeds"
-        sub="NTAA VAT attribution: 30% place-of-consumption. Feeds are ed25519-signed by JRB and served via gateway F7 after signature verification."
+        sub="NTAA VAT attribution (gazetted): 50% equality / 20% population / 30% place-of-consumption. Feeds are ed25519-signed by JRB and served via gateway F7 after signature verification."
       />
       <ErrorBox error={error} />
       <div className="mb-4 flex items-center gap-3">
@@ -102,8 +102,8 @@ export default function AttributionFeeds({ session }: { session: Session }) {
               <tr className="border-b border-neutral-200">
                 <th scope="col" className="th">State</th>
                 <th scope="col" className="th">Consumption (30%)</th>
-                <th scope="col" className="th">Equality</th>
-                <th scope="col" className="th">Derivation</th>
+                <th scope="col" className="th">Equality (50%)</th>
+                <th scope="col" className="th">Population (20%)</th>
                 <th scope="col" className="th">Total</th>
               </tr>
             </thead>
@@ -113,7 +113,7 @@ export default function AttributionFeeds({ session }: { session: Session }) {
                   <td className="td font-mono text-xs">{s.state_code}</td>
                   <td className="td">{fmtKobo(s.consumption_portion_kobo)}</td>
                   <td className="td">{fmtKobo(s.equality_portion_kobo)}</td>
-                  <td className="td">{fmtKobo(s.derivation_portion_kobo)}</td>
+                  <td className="td">{fmtKobo(s.population_portion_kobo)}</td>
                   <td className="td font-semibold">{fmtKobo(s.total_kobo)}</td>
                 </tr>
               ))}
