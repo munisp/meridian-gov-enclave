@@ -17,8 +17,13 @@ step-by-step collection with explicit confirm), hardened to enclave rules:
   the Meta message id that STARTED the flow (Meta message ids are stable
   across redelivery) and pinned in the session for the whole conversation —
   a double-confirm or webhook redelivery can never create a second invoice.
+  On AMBIGUOUS upstream outcomes (timeout / network / 5xx) the pinned key is
+  PRESERVED and the user is told the status is being confirmed — the retry
+  re-issues with the SAME key so the backend dedups; only a definitive 4xx
+  rejection clears the key.
 - Honesty: any upstream failure (network, non-2xx, malformed response) yields
-  an honest error reply; a confirmation/IRN is NEVER fabricated.
+  an honest error reply; a confirmation/IRN is NEVER fabricated, and "no
+  invoice was created" is only asserted on definitive 4xx rejections.
 - Fail-closed gate: HERMES_EINVOICING_URL / HERMES_EINVOICING_SERVICE_TOKEN
   unset -> the feature is DISABLED with an explicit log line and the bot
   tells the user the feature is unavailable (same behaviour in prod and dev;
@@ -80,7 +85,18 @@ UNBOUND_TEXT = (
 
 class EinvoicingError(RuntimeError):
     """Upstream einvoicing call failed (network / non-2xx / bad body).
-    Surfaced to the user as an honest error — never a fake confirmation."""
+    Surfaced to the user as an honest error — never a fake confirmation.
+
+    ``ambiguous`` marks failures where the upstream MAY have created the
+    invoice despite the error (network failure, timeout, 5xx after the
+    request was accepted). Ambiguous outcomes must preserve the pinned
+    idempotency key so a retry re-issues with the SAME key and the backend
+    dedups; only a definitive 4xx rejection proves no invoice exists and
+    allows the key to be discarded."""
+
+    def __init__(self, message: str, *, ambiguous: bool = True):
+        super().__init__(message)
+        self.ambiguous = ambiguous
 
 
 def _urllib_transport(url: str, headers: dict[str, str], body: bytes,
@@ -127,9 +143,12 @@ class EinvoicingClient:
                 detail = json.loads(raw).get("detail", "")[:200]
             except Exception:  # noqa: BLE001 - best-effort detail only
                 pass
+            # 4xx = definitive rejection (no invoice created); 5xx/3xx =
+            # ambiguous (the service may have created it before failing).
             raise EinvoicingError(
                 f"einvoicing service rejected the request: HTTP {e.code}"
-                + (f" ({detail})" if detail else "")) from e
+                + (f" ({detail})" if detail else ""),
+                ambiguous=e.code >= 500 or e.code < 400) from e
         except EinvoicingError:
             raise
         except Exception as e:  # noqa: BLE001 - timeout/network, fail closed
@@ -411,13 +430,40 @@ class InvoiceFlow:
                 amount_kobo=int(kobo), description=desc,
                 idempotency_key=idem)
         except EinvoicingError as e:
-            # Honest failure: the flow is reset; NO confirmation is faked.
+            if e.ambiguous:
+                # Ambiguous outcome (timeout / network / 5xx): the service
+                # MAY have created the invoice. PRESERVE the flow state and
+                # the pinned idempotency key — a retry re-issues with the
+                # SAME key so the backend dedups and at most one invoice can
+                # ever exist for this flow. Never assert "no invoice was
+                # created": on this path that claim is unprovable, and
+                # destroying the key would make the user's retry mint a
+                # duplicate real invoice.
+                st[_ST_STATE] = "confirm"
+                self._save(wa_id, st)
+                log.error("whatsapp invoice: issuance outcome UNKNOWN "
+                          "wa_id=%s (idempotency key preserved): %s",
+                          wa_id, e)
+                self.wa.send_buttons(
+                    wa_id,
+                    "The e-invoicing service did not confirm the result "
+                    f"({e}). The invoice's status is being confirmed — it "
+                    "may already have been issued.\n\n"
+                    "Tap Retry to re-check with the same reference (you can "
+                    "NEVER be double-charged: the same idempotency key is "
+                    "reused and the service deduplicates it), or CANCEL and "
+                    "check later via IRN.",
+                    [(BTN_CONFIRM, "Retry"), (BTN_CANCEL, "Cancel")])
+                return True
+            # Definitive 4xx rejection: the service proved it created
+            # nothing, so the flow and key are safe to clear; a retry will
+            # start a fresh flow with a fresh key.
             self._reset(st)
             self._save(wa_id, st)
-            log.error("whatsapp invoice: issuance failed wa_id=%s: %s",
-                      wa_id, e)
+            log.error("whatsapp invoice: issuance definitively rejected "
+                      "wa_id=%s: %s", wa_id, e)
             self.wa.send_text(wa_id, "We could NOT issue the invoice: the "
-                                     "e-invoicing service reported an error "
+                                     "e-invoicing service rejected it "
                                      f"({e}). No invoice was created. Send "
                                      "INVOICE to try again.")
             return True
