@@ -204,6 +204,44 @@ rules:
 	}
 }
 
+func TestAttributionPackNegativeWeightRejected(t *testing.T) {
+	// V2 residual: a pack 11000/-500/-500 still sums to 10000 bps but must
+	// be rejected — negative weights produce NEGATIVE state portions. Fail
+	// closed to the statutory 50/20/30 constants.
+	dir := t.TempDir()
+	writePack(t, dir, "rp-attribution-formula", `id: rp-attribution-formula
+version: 1.0.0
+effective_from: 2026-01-01
+rules:
+  - id: attr.vat.state_share
+    then:
+      equality_weight_bps: 11000
+      population_weight_bps: -500
+      place_of_consumption_weight_bps: -500
+`)
+	f := LoadAttributionFormula(dir)
+	if f.EqualityWeightBps != 5000 || f.PopulationWeightBps != 2000 ||
+		f.PlaceOfConsumptionWeightBps != 3000 {
+		t.Fatalf("negative-weight pack must fail closed to statutory 50/20/30: got %d/%d/%d",
+			f.EqualityWeightBps, f.PopulationWeightBps, f.PlaceOfConsumptionWeightBps)
+	}
+	// And the formula must still compute non-negative portions.
+	inputs := []StateConsumptionInput{
+		{StateCode: "NG-LA", ConsumptionBps: 5000, PopulationBps: 5000},
+		{StateCode: "NG-KN", ConsumptionBps: 5000, PopulationBps: 5000},
+	}
+	feed, err := f.BuildAttributionFeed("2026-07", 1_000_000_00, inputs)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, s := range feed.States {
+		if s.EqualityPortionKobo < 0 || s.PopulationPortionKobo < 0 ||
+			s.ConsumptionPortionKobo < 0 || s.TotalKobo < 0 {
+			t.Fatalf("state %s has a negative portion: %+v", s.StateCode, s)
+		}
+	}
+}
+
 func TestSignedFeedVerifies(t *testing.T) {
 	signer, err := NewFeedSigner(t.TempDir())
 	if err != nil {
