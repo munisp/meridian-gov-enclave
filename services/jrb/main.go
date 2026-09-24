@@ -15,6 +15,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/munisp/meridian-gov-enclave/packages/authx"
@@ -41,6 +42,13 @@ type Server struct {
 	gateway  *GatewayClient
 	emitter  eventx.Emitter
 	http     *http.Client
+
+	// feedCache holds the latest signed attribution feed bytes so latestFeed
+	// does not re-read latest.json from disk on EVERY request (the feed
+	// changes ~monthly). Invalidated/updated by saveFeed on publish — no
+	// staleness window within this process.
+	feedCacheMu sync.RWMutex
+	feedCache   []byte
 }
 
 func main() {
@@ -366,17 +374,32 @@ func (s *Server) saveFeed(period string, doc *SignedFeedDoc) error {
 	if err := os.WriteFile(filepath.Join(dir, period+".json"), data, 0o644); err != nil {
 		return err
 	}
-	return os.WriteFile(filepath.Join(dir, "latest.json"), data, 0o644)
+	if err := os.WriteFile(filepath.Join(dir, "latest.json"), data, 0o644); err != nil {
+		return err
+	}
+	s.feedCacheMu.Lock()
+	s.feedCache = data // invalidate-on-publish: new feed is now the cached one
+	s.feedCacheMu.Unlock()
+	return nil
 }
 
 // latestFeed serves the latest signed feed. The path carries a state segment to
 // match the gateway F7 contract; the signed document covers all states and the
 // gateway/state portal extracts its own row.
 func (s *Server) latestFeed(w http.ResponseWriter, _ *http.Request) {
-	data, err := os.ReadFile(filepath.Join(s.cfg.DataRoot, "feeds", "latest.json"))
-	if err != nil {
-		writeProblem(w, http.StatusNotFound, "No feed", "no attribution feed published yet")
-		return
+	s.feedCacheMu.RLock()
+	data := s.feedCache
+	s.feedCacheMu.RUnlock()
+	if data == nil { // cold start (or feed pre-dates this process): read once
+		var err error
+		data, err = os.ReadFile(filepath.Join(s.cfg.DataRoot, "feeds", "latest.json"))
+		if err != nil {
+			writeProblem(w, http.StatusNotFound, "No feed", "no attribution feed published yet")
+			return
+		}
+		s.feedCacheMu.Lock()
+		s.feedCache = data
+		s.feedCacheMu.Unlock()
 	}
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusOK)
