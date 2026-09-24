@@ -183,3 +183,63 @@ func TestSchemaConsistency(t *testing.T) {
 		}
 	}
 }
+
+// PERF: the short-TTL check cache — repeat checks within the TTL make ONE
+// upstream call; after expiry the server is consulted again; errors are
+// never cached (fail-closed immediacy is preserved).
+func TestPermifyCheckCacheHitSkipsUpstream(t *testing.T) {
+	var calls int32
+	c, done := newTestPermifyClient(func(w http.ResponseWriter, r *http.Request) {
+		atomic.AddInt32(&calls, 1)
+		w.Write([]byte(`{"can":"RESULT_ALLOWED"}`))
+	})
+	defer done()
+	c.cacheTTL = time.Minute
+	for i := 0; i < 5; i++ {
+		ok, err := c.Check(context.Background(), "flow:f1", "send", "user:u1")
+		if err != nil || !ok {
+			t.Fatalf("want allowed, got %v %v", ok, err)
+		}
+	}
+	if n := atomic.LoadInt32(&calls); n != 1 {
+		t.Fatalf("5 checks within TTL must hit upstream once, got %d", n)
+	}
+	// A different (entity, permission, subject) tuple is a different key.
+	if _, err := c.Check(context.Background(), "flow:f1", "send", "user:u2"); err != nil {
+		t.Fatal(err)
+	}
+	if n := atomic.LoadInt32(&calls); n != 2 {
+		t.Fatalf("distinct subject must miss the cache, got %d calls", n)
+	}
+}
+
+func TestPermifyCheckCacheExpiryAndNoErrorCaching(t *testing.T) {
+	var calls int32
+	now := time.Now()
+	c, done := newTestPermifyClient(func(w http.ResponseWriter, r *http.Request) {
+		n := atomic.AddInt32(&calls, 1)
+		if n == 2 || n == 3 { // both attempts of the second Check fail
+			w.WriteHeader(http.StatusServiceUnavailable)
+			return
+		}
+		w.Write([]byte(`{"can":"RESULT_ALLOWED"}`))
+	})
+	defer done()
+	c.cacheTTL = time.Minute
+	c.now = func() time.Time { return now }
+	if _, err := c.Check(context.Background(), "flow:f1", "send", "user:u1"); err != nil {
+		t.Fatal(err)
+	}
+	now = now.Add(2 * time.Minute) // past TTL -> refetch; this one 503s twice (retry)
+	if _, err := c.Check(context.Background(), "flow:f1", "send", "user:u1"); err == nil {
+		t.Fatal("want error after expiry when upstream 503s")
+	}
+	// The error was not cached: the very next check retries upstream (and
+	// now succeeds), instead of serving a remembered failure.
+	if _, err := c.Check(context.Background(), "flow:f1", "send", "user:u1"); err != nil {
+		t.Fatalf("error must not be cached: %v", err)
+	}
+	if n := atomic.LoadInt32(&calls); n != 4 {
+		t.Fatalf("want 4 upstream calls (1 ok, 2x 503, 1 ok), got %d", n)
+	}
+}
