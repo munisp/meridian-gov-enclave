@@ -34,7 +34,24 @@ CREATE TABLE IF NOT EXISTS tcc_docs(
 CREATE UNIQUE INDEX IF NOT EXISTS tcc_revocations_cert_uniq
     ON tcc_docs ((doc->>'certificate_id'))
     WHERE collection = 'tcc_revocations' AND doc ? 'certificate_id';
+-- PERF: scan() orders by (updated_at, id); without this index every audit /
+-- SLA / revocation-list call did a full-collection seq scan + in-memory sort
+-- whose cost grows without bound (the collections are append-mostly).
+CREATE INDEX IF NOT EXISTS tcc_docs_collection_updated_idx
+    ON tcc_docs (collection, updated_at, id);
 """
+
+# RETENTION POLICY (append-only audit trail, WORM-preserving):
+# ``tcc_revocations`` records are statutory audit evidence (NTAA 2025 s.72);
+# they are APPEND-ONLY and are never pruned, rewritten or merged by this
+# service. Bounded retention (e.g. partitioning + dropping partitions older
+# than the statutory retention period, or archiving cold partitions to
+# object-lock storage) is a DBA/ops decision that must be made against the
+# records-retention schedule, NOT silently in application code — an
+# app-level DELETE would break the audit-trail completeness guarantee the
+# R4 append-only design exists to protect. Accordingly this store offers no
+# delete operation at all. Growth is bounded in practice by the certificate
+# issuance rate; read cost is bounded by the indexes above.
 
 _UPSERT = ("INSERT INTO tcc_docs(collection, id, doc, updated_at) "
            "VALUES(%s,%s,%s,now()) ON CONFLICT (collection, id) DO UPDATE "
@@ -60,65 +77,105 @@ class _MemBackend:
 
     def __init__(self) -> None:
         self._d: dict[tuple[str, str], dict] = {}
+        # The lock lives HERE (not around the Postgres backend): the memory
+        # backend needs check+write atomicity, while the Postgres backend is
+        # already atomic per statement (PK conflict, conditional UPDATE) and
+        # a process-global lock there only serialised network I/O.
+        self._lock = threading.Lock()
 
     def put(self, coll: str, rid: str, doc: dict) -> None:
-        self._d[(coll, rid)] = dict(doc)
+        with self._lock:
+            self._d[(coll, rid)] = dict(doc)
 
     def get(self, coll: str, rid: str) -> dict | None:
-        d = self._d.get((coll, rid))
-        return dict(d) if d is not None else None
+        with self._lock:
+            d = self._d.get((coll, rid))
+            return dict(d) if d is not None else None
 
     def scan(self, coll: str) -> list[dict]:
-        return [dict(v) for (c, _), v in self._d.items() if c == coll]
+        with self._lock:
+            return [dict(v) for (c, _), v in self._d.items() if c == coll]
+
+    def scan_where_eq(self, coll: str, field: str, value: str) -> list[dict]:
+        with self._lock:
+            return [dict(v) for (c, _), v in self._d.items()
+                    if c == coll and str(v.get(field, "")) == value]
 
     def put_if_absent(self, coll: str, rid: str, doc: dict) -> bool:
-        if (coll, rid) in self._d:
-            return False
-        self._d[(coll, rid)] = dict(doc)
-        return True
+        with self._lock:
+            if (coll, rid) in self._d:
+                return False
+            self._d[(coll, rid)] = dict(doc)
+            return True
 
     def update_where_ne(self, coll: str, rid: str, doc: dict,
                         field: str, disallowed: str) -> bool:
-        cur = self._d.get((coll, rid))
-        if cur is None or cur.get(field) == disallowed:
-            return False
-        self._d[(coll, rid)] = dict(doc)
-        return True
+        with self._lock:
+            cur = self._d.get((coll, rid))
+            if cur is None or cur.get(field) == disallowed:
+                return False
+            self._d[(coll, rid)] = dict(doc)
+            return True
 
 
 class _PostgresBackend:
+    """Postgres backend via psycopg_pool.ConnectionPool.
+
+    Previously ALL request threads (FastAPI's 40-worker sync pool) shared a
+    single psycopg connection, which serialises every operation on one
+    network pipe; a short-lived pool connection is now checked out per
+    operation so concurrent requests use concurrent connections. Atomicity
+    is unchanged: every mutating statement is a single autocommit statement
+    (PK-conflict insert / conditional UPDATE), exactly as before."""
+
     kind = "postgres"
 
     def __init__(self, dsn: str) -> None:
-        import psycopg  # psycopg[binary], imported lazily so dev needs nothing
+        # psycopg[binary] + psycopg-pool, imported lazily so dev needs nothing
+        from psycopg_pool import ConnectionPool
 
-        self.conn = psycopg.connect(dsn, autocommit=True)
-        with self.conn.cursor() as cur:
+        max_size = int(os.environ.get("TCC_DB_POOL_MAX", "8"))
+        self.pool = ConnectionPool(
+            dsn, min_size=1, max_size=max_size, open=True,
+            kwargs={"autocommit": True})
+        with self.pool.connection() as conn, conn.cursor() as cur:
             cur.execute(_PG_DDL)
-        log.info("profile=prod component=store (postgres)")
+        log.info("profile=prod component=store (postgres pool max=%d)", max_size)
 
     def put(self, coll: str, rid: str, doc: dict) -> None:
-        with self.conn.cursor() as cur:
+        with self.pool.connection() as conn, conn.cursor() as cur:
             cur.execute(_UPSERT, (coll, rid, json.dumps(doc)))
 
     def get(self, coll: str, rid: str) -> dict | None:
-        with self.conn.cursor() as cur:
+        with self.pool.connection() as conn, conn.cursor() as cur:
             cur.execute("SELECT doc FROM tcc_docs WHERE collection=%s AND id=%s",
                         (coll, rid))
             row = cur.fetchone()
         return dict(row[0]) if row else None
 
     def scan(self, coll: str) -> list[dict]:
-        with self.conn.cursor() as cur:
+        with self.pool.connection() as conn, conn.cursor() as cur:
             cur.execute("SELECT doc FROM tcc_docs WHERE collection=%s "
                         "ORDER BY updated_at, id", (coll,))
+            rows = cur.fetchall()
+        return [dict(r[0]) for r in rows]
+
+    def scan_where_eq(self, coll: str, field: str, value: str) -> list[dict]:
+        """Point query on a JSONB scalar field. For
+        (coll='tcc_revocations', field='certificate_id') the planner serves
+        this from the tcc_revocations_cert_uniq partial index instead of a
+        full-collection scan + ORDER BY."""
+        with self.pool.connection() as conn, conn.cursor() as cur:
+            cur.execute("SELECT doc FROM tcc_docs WHERE collection=%s "
+                        "AND doc->>%s=%s ORDER BY updated_at, id",
+                        (coll, field, value))
             rows = cur.fetchall()
         return [dict(r[0]) for r in rows]
 
     def put_if_absent(self, coll: str, rid: str, doc: dict) -> bool:
         import psycopg  # psycopg[binary], lazy as in __init__
         try:
-            with self.conn.cursor() as cur:
+            with self.pool.connection() as conn, conn.cursor() as cur:
                 cur.execute(_INSERT_IF_ABSENT, (coll, rid, json.dumps(doc)))
                 return cur.rowcount == 1
         except psycopg.IntegrityError:
@@ -126,12 +183,13 @@ class _PostgresBackend:
             # conflicts; this covers a conflict on the R4-9b partial unique
             # index (tcc_revocations_cert_uniq) raised by a concurrent
             # transaction's in-flight insert. Semantically identical: the
-            # record slot is taken, this caller did not create it.
+            # record slot is taken, this caller did not create it. (autocommit
+            # => no aborted transaction poisons the pooled connection.)
             return False
 
     def update_where_ne(self, coll: str, rid: str, doc: dict,
                         field: str, disallowed: str) -> bool:
-        with self.conn.cursor() as cur:
+        with self.pool.connection() as conn, conn.cursor() as cur:
             cur.execute(_UPDATE_WHERE_NE.format(field=field),
                         (json.dumps(doc), coll, rid, disallowed))
             return cur.rowcount == 1
@@ -142,7 +200,6 @@ class DocStore:
     (dev) and Postgres (prod, TCC_DATABASE_URL/DATABASE_URL)."""
 
     def __init__(self, dsn: str | None = None) -> None:
-        self._lock = threading.Lock()
         dsn = dsn if dsn is not None else (
             os.environ.get("TCC_DATABASE_URL") or os.environ.get("DATABASE_URL", ""))
         if dsn:
@@ -159,8 +216,7 @@ class DocStore:
         return self._b.kind
 
     def put(self, collection: str, rid: str, doc: dict) -> None:
-        with self._lock:
-            self._b.put(collection, rid, dict(doc))
+        self._b.put(collection, rid, dict(doc))
 
     def get(self, collection: str, rid: str) -> dict | None:
         return self._b.get(collection, rid)
@@ -168,22 +224,33 @@ class DocStore:
     def scan(self, collection: str) -> list[dict]:
         return self._b.scan(collection)
 
+    def scan_where_eq(self, collection: str, field: str, value: str) -> list[dict]:
+        """Docs in ``collection`` whose top-level JSONB ``field`` equals
+        ``value``. On Postgres this is a single indexed predicate (served by
+        tcc_revocations_cert_uniq for revocation lookups) instead of a
+        full-collection scan shipped to the client."""
+        if not field.isidentifier():
+            raise ValueError(f"unsafe field name {field!r}")
+        sw = getattr(self._b, "scan_where_eq", None)
+        if sw is None:  # duck-typed backends without the point query
+            return [d for d in self._b.scan(collection)
+                    if str(d.get(field, "")) == value]
+        return sw(collection, field, value)
+
     def put_if_absent(self, collection: str, rid: str, doc: dict) -> bool:
         """Append-only insert; False when (collection, rid) already exists.
-        Atomic on both backends (PK conflict on Postgres, store lock in
+        Atomic on both backends (PK conflict on Postgres, backend lock in
         memory) — a record created this way is never overwritten."""
-        with self._lock:
-            return self._b.put_if_absent(collection, rid, dict(doc))
+        return self._b.put_if_absent(collection, rid, dict(doc))
 
     def update_where_ne(self, collection: str, rid: str, doc: dict,
                         field: str, disallowed: str) -> bool:
         """Compare-and-swap: replace the doc only if its current ``field``
         value is not ``disallowed`` (a missing field counts as allowed).
         False when the record is absent or already in the disallowed state.
-        Atomic: one conditional UPDATE on Postgres; the store lock spans
+        Atomic: one conditional UPDATE on Postgres; the backend lock spans
         check+write on the in-memory backend."""
         if not field.isidentifier():
             raise ValueError(f"unsafe field name {field!r}")
-        with self._lock:
-            return self._b.update_where_ne(collection, rid, dict(doc),
-                                           field, disallowed)
+        return self._b.update_where_ne(collection, rid, dict(doc),
+                                       field, disallowed)

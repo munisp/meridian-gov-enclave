@@ -142,10 +142,12 @@ class TccStore:
         raise TccError("revocation audit trail write failed")
 
     def revocation_for(self, certificate_id: str) -> dict | None:
-        """The revocation audit record for a cert, if one exists."""
-        for d in self._docs.scan("tcc_revocations"):
-            if d.get("certificate_id") == certificate_id:
-                return d
+        """The revocation audit record for a cert, if one exists. Point
+        query on Postgres (served by the tcc_revocations_cert_uniq partial
+        index), not a full-collection scan."""
+        for d in self._docs.scan_where_eq("tcc_revocations",
+                                          "certificate_id", certificate_id):
+            return d
         return None
 
     def revocations(self) -> list[dict]:

@@ -20,7 +20,9 @@ import (
 	"log"
 	"net/http"
 	"os"
+	"strconv"
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -30,6 +32,25 @@ type PermifyClient struct {
 	tenant  string
 	hc      *http.Client
 	timeout time.Duration
+
+	// Short-TTL allow/deny cache keyed by entity#permission@subject.
+	// Without it EVERY authorized request pays a synchronous Permify RTT
+	// (worst case 2x the 2s timeout on a flapping server before fail-close).
+	// Staleness bound: a permission/schema change made directly on Permify
+	// takes up to cacheTTL to be reflected here (permission writes are admin
+	// operations outside this gateway, which is why invalidation is TTL-based
+	// rather than push). The TTL is deliberately conservative (default 5s,
+	// PERMIFY_CACHE_TTL_MS to tune); errors are NEVER cached, so a Permify
+	// outage still fails closed immediately.
+	cacheTTL time.Duration
+	cacheMu  sync.RWMutex
+	cache    map[string]permifyCacheEntry
+	now      func() time.Time // injectable for tests
+}
+
+type permifyCacheEntry struct {
+	allowed bool
+	expires time.Time
 }
 
 // NewPermifyClient builds a client for the server at baseURL.
@@ -37,11 +58,18 @@ func NewPermifyClient(baseURL, tenant string) *PermifyClient {
 	if tenant == "" {
 		tenant = "t1"
 	}
+	ttl := 5 * time.Second
+	if ms, err := strconv.Atoi(os.Getenv("PERMIFY_CACHE_TTL_MS")); err == nil && ms >= 0 {
+		ttl = time.Duration(ms) * time.Millisecond
+	}
 	return &PermifyClient{
-		base:    strings.TrimRight(baseURL, "/"),
-		tenant:  tenant,
-		hc:      &http.Client{},
-		timeout: 2 * time.Second,
+		base:     strings.TrimRight(baseURL, "/"),
+		tenant:   tenant,
+		hc:       &http.Client{},
+		timeout:  2 * time.Second,
+		cacheTTL: ttl,
+		cache:    map[string]permifyCacheEntry{},
+		now:      time.Now,
 	}
 }
 
@@ -75,10 +103,27 @@ func (c *PermifyClient) Check(ctx context.Context, entity, permission, subject s
 	})
 	url := c.base + "/v1/tenants/" + c.tenant + "/permissions/check"
 
+	// Cache hit: no Permify RTT at all.
+	key := entity + "#" + permission + "@" + subject
+	if c.cacheTTL > 0 {
+		c.cacheMu.RLock()
+		e, ok := c.cache[key]
+		c.cacheMu.RUnlock()
+		if ok && c.now().Before(e.expires) {
+			return e.allowed, nil
+		}
+	}
+
 	var lastErr error
 	for attempt := 0; attempt < 2; attempt++ {
 		allowed, retryable, err := c.do(ctx, url, body)
 		if err == nil {
+			if c.cacheTTL > 0 {
+				c.cacheMu.Lock()
+				c.cache[key] = permifyCacheEntry{allowed: allowed,
+					expires: c.now().Add(c.cacheTTL)}
+				c.cacheMu.Unlock()
+			}
 			return allowed, nil
 		}
 		lastErr = err

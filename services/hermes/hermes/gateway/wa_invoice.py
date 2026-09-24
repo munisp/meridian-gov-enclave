@@ -39,11 +39,14 @@ import hashlib
 import json
 import logging
 import re
+import threading
 import urllib.error
-import urllib.request
+import urllib.request  # noqa: F401 - injected transports/tests may raise urllib errors
 from datetime import date
 from decimal import Decimal, InvalidOperation
 from typing import Any, Callable, Optional
+
+import httpx
 
 from .wa_onboarding import mask_tin, valid_tin
 
@@ -104,12 +107,50 @@ class EinvoicingError(RuntimeError):
         self.ambiguous = ambiguous
 
 
-def _urllib_transport(url: str, headers: dict[str, str], body: bytes,
-                      timeout_s: float) -> dict[str, Any]:
-    req = urllib.request.Request(url, data=body, headers=headers, method="POST")
-    with urllib.request.urlopen(req, timeout=timeout_s) as resp:  # nosec - env-configured host
-        raw = resp.read().decode()
-        return json.loads(raw) if raw.strip() else {}
+class _UpstreamHTTPError(Exception):
+    """Non-2xx response from the pooled httpx transport. Mirrors
+    urllib.error.HTTPError's (code, detail) contract so _post_nrs keeps ONE
+    error-mapping path regardless of which default/injected transport ran."""
+
+    def __init__(self, code: int, detail: str = ""):
+        super().__init__(f"HTTP {code}")
+        self.code = code
+        self.detail = detail
+
+
+# One pooled client for ALL einvoicing calls: previously each call went over
+# a fresh urllib connection (full TCP+TLS handshake per invoice/status call)
+# and ran inside Starlette's shared request threadpool with a 15s ceiling.
+_SHARED_HTTP: "httpx.Client | None" = None
+_SHARED_HTTP_LOCK = threading.Lock()
+
+
+def _shared_http_client() -> "httpx.Client":
+    global _SHARED_HTTP
+    with _SHARED_HTTP_LOCK:
+        if _SHARED_HTTP is None:
+            _SHARED_HTTP = httpx.Client(
+                timeout=httpx.Timeout(15.0, connect=5.0))
+    return _SHARED_HTTP
+
+
+def _httpx_transport(url: str, headers: dict[str, str], body: bytes,
+                     timeout_s: float) -> dict[str, Any]:
+    """Default transport: pooled httpx client (connection reuse), per-call
+    timeout preserved. Non-2xx -> _UpstreamHTTPError for the shared
+    error-mapping path; timeouts/network errors propagate (mapped to
+    ambiguous EinvoicingError by the caller, as before)."""
+    resp = _shared_http_client().post(url, headers=headers, content=body,
+                                      timeout=timeout_s)  # nosec - env-configured host
+    if resp.status_code >= 400:
+        detail = ""
+        try:
+            detail = str(resp.json().get("detail", ""))[:200]
+        except Exception:  # noqa: BLE001 - best-effort detail only
+            pass
+        raise _UpstreamHTTPError(resp.status_code, detail)
+    raw = resp.text
+    return json.loads(raw) if raw.strip() else {}
 
 
 class EinvoicingClient:
@@ -122,7 +163,7 @@ class EinvoicingClient:
         self.base_url = base_url.rstrip("/")
         self.service_token = service_token
         self.timeout_s = timeout_s
-        self.transport = transport or _urllib_transport
+        self.transport = transport or _httpx_transport
 
     @property
     def enabled(self) -> bool:
@@ -141,19 +182,26 @@ class EinvoicingClient:
         body = json.dumps(payload).encode()
         try:
             return self.transport(url, headers, body, self.timeout_s)
-        except urllib.error.HTTPError as e:
-            detail = ""
-            try:
-                raw = e.read().decode()
-                detail = json.loads(raw).get("detail", "")[:200]
-            except Exception:  # noqa: BLE001 - best-effort detail only
-                pass
+        except (urllib.error.HTTPError, _UpstreamHTTPError) as e:
+            # urllib.error.HTTPError: injected/legacy transports;
+            # _UpstreamHTTPError: the default pooled httpx transport. Same
+            # (code, detail) contract either way.
+            if isinstance(e, _UpstreamHTTPError):
+                code, detail = e.code, e.detail
+            else:
+                code = e.code
+                detail = ""
+                try:
+                    raw = e.read().decode()
+                    detail = json.loads(raw).get("detail", "")[:200]
+                except Exception:  # noqa: BLE001 - best-effort detail only
+                    pass
             # 4xx = definitive rejection (no invoice created); 5xx/3xx =
             # ambiguous (the service may have created it before failing).
             raise EinvoicingError(
-                f"einvoicing service rejected the request: HTTP {e.code}"
+                f"einvoicing service rejected the request: HTTP {code}"
                 + (f" ({detail})" if detail else ""),
-                ambiguous=e.code >= 500 or e.code < 400) from e
+                ambiguous=code >= 500 or code < 400) from e
         except EinvoicingError:
             raise
         except Exception as e:  # noqa: BLE001 - timeout/network, fail closed
