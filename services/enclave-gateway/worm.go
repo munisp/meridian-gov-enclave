@@ -128,6 +128,11 @@ type LocalWORMStore struct {
 	dir    string
 	mu     sync.Mutex
 	signer *ReceiptSigner // nil: unsigned receipts (legacy dev)
+	// lastHash caches the manifest chain head. Store holds mu for the whole
+	// append, so only this process can extend the chain and the cache is
+	// authoritative after startup. Previously lastManifestHash re-read the
+	// ENTIRE manifest.log on every Store (O(log size) per evidence write).
+	lastHash string
 }
 
 func NewLocalWORMStore(root string) (*LocalWORMStore, error) {
@@ -135,7 +140,9 @@ func NewLocalWORMStore(root string) (*LocalWORMStore, error) {
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		return nil, err
 	}
-	return &LocalWORMStore{dir: dir}, nil
+	s := &LocalWORMStore{dir: dir}
+	s.lastHash = s.lastManifestHash() // one full read, once, at startup
+	return s, nil
 }
 
 // SetReceiptSigner attaches a receipt signer (HSM/KMS provider-backed or
@@ -175,8 +182,8 @@ func (s *LocalWORMStore) Store(flow, messageID string, payload []byte) (*Evidenc
 	if err := os.WriteFile(objPath, data, 0o444); err != nil { // read-only: write-once
 		return nil, err
 	}
-	// Tamper-evident chained manifest.
-	prev := s.lastManifestHash()
+	// Tamper-evident chained manifest; chain head from the in-memory cache.
+	prev := s.lastHash
 	mline := fmt.Sprintf("%s %s %s prev=%s\n", receipt.StoredAt, id, receipt.SHA256, prev)
 	mh := sha256.Sum256(append([]byte(prev), []byte(mline)...))
 	f, err := os.OpenFile(filepath.Join(s.dir, "manifest.log"), os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o644)
@@ -187,9 +194,13 @@ func (s *LocalWORMStore) Store(flow, messageID string, payload []byte) (*Evidenc
 	if _, err := f.WriteString(mline + "manifest_hash=" + hex.EncodeToString(mh[:]) + "\n"); err != nil {
 		return nil, err
 	}
+	s.lastHash = hex.EncodeToString(mh[:]) // chain extended; update cache
 	return receipt, nil
 }
 
+// lastManifestHash reads the chain head from disk. Called once at startup;
+// per-write hashing uses the in-memory lastHash (Store holds mu, so the
+// chain cannot advance behind the cache's back).
 func (s *LocalWORMStore) lastManifestHash() string {
 	data, err := os.ReadFile(filepath.Join(s.dir, "manifest.log"))
 	if err != nil || len(data) == 0 {
