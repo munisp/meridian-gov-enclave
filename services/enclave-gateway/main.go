@@ -15,6 +15,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -41,6 +42,23 @@ type Server struct {
 	mu        sync.Mutex
 	receipts  []*EvidenceReceipt // in-memory receipt log (admin console)
 	perm      *PermifyClient     // non-nil when PERMIFY_URL selects live authz (P0)
+
+	// feedCache: verified F7 attribution feed bytes keyed by state. Without
+	// it every F7 request pays an upstream jrb fetch (or disk read) plus an
+	// ed25519 verification of data that changes ~monthly. TTL-bounded
+	// (default 60s, F7_FEED_CACHE_TTL_S to tune): a NEW feed published to
+	// jrb is picked up within one TTL — there is no push invalidation
+	// channel between jrb and the gateway, hence the conservative TTL.
+	// Only SIGNATURE-VERIFIED bytes are ever cached; verification still
+	// runs on every cache miss.
+	feedCache    map[string]feedCacheEntry
+	feedCacheMu  sync.RWMutex
+	feedCacheTTL time.Duration
+}
+
+type feedCacheEntry struct {
+	body    []byte
+	expires time.Time
 }
 
 func main() {
@@ -77,9 +95,14 @@ func main() {
 	if err != nil {
 		log.Fatalf("permify authz (fail closed): %v", err)
 	}
+	feedTTL := 60 * time.Second
+	if secs, err := strconv.Atoi(os.Getenv("F7_FEED_CACHE_TTL_S")); err == nil && secs >= 0 {
+		feedTTL = time.Duration(secs) * time.Second
+	}
 	s := &Server{cfg: cfg, authn: newAuthenticator(cfg),
 		http: &http.Client{Timeout: 10 * time.Second, Transport: otelx.Client(nil)},
-		worm: worm, localWorm: local, perm: perm}
+		worm: worm, localWorm: local, perm: perm,
+		feedCache: map[string]feedCacheEntry{}, feedCacheTTL: feedTTL}
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /healthz", s.healthz)
@@ -226,6 +249,16 @@ func (s *Server) handleF7(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	state := r.PathValue("state")
+	// Cache hit: signature was verified when the entry was stored.
+	s.feedCacheMu.RLock()
+	ce, ok := s.feedCache[state]
+	s.feedCacheMu.RUnlock()
+	if ok && time.Now().Before(ce.expires) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write(ce.body)
+		return
+	}
 	var feed []byte
 	if s.cfg.JRBURL != "" {
 		resp, err := s.upstreamGet(r, s.cfg.JRBURL+"/v1/attribution/feeds/"+state+"/latest")
@@ -267,6 +300,14 @@ func (s *Server) handleF7(w http.ResponseWriter, r *http.Request) {
 		writeProblem(w, http.StatusBadGateway, "Signature verification failed",
 			"attribution feed signature invalid; refusing to serve")
 		return
+	}
+	if s.feedCacheTTL > 0 {
+		s.feedCacheMu.Lock()
+		if s.feedCache == nil { // tests construct Server literals directly
+			s.feedCache = map[string]feedCacheEntry{}
+		}
+		s.feedCache[state] = feedCacheEntry{body: feed, expires: time.Now().Add(s.feedCacheTTL)}
+		s.feedCacheMu.Unlock()
 	}
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusOK)
