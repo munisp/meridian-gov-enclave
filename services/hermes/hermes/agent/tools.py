@@ -1,8 +1,9 @@
-"""Typed tool registry + executor.
+"""Typed pydantic tool schemas + wrappers for all 5 Hermes agents (SPEC D).
 
-Every agent's tools are declared here with JSON Schema params; the executor
-calls platform REST endpoints with the END USER's Bearer token (never a
-service token). Static tools (glossary, doc hints) resolve locally.
+Each tool is a typed wrapper over a platform REST surface (canonical paths in
+hermes.config.ENDPOINTS). HTTP tools execute with the END USER's Keycloak
+token (never a service super-token) so authorization stays user-scoped.
+Static tools (explain_term, upload_doc_hint) resolve locally for fidelity.
 """
 from __future__ import annotations
 
@@ -16,27 +17,16 @@ import uuid
 from typing import Any, Literal, Optional
 
 import httpx
+from pydantic import BaseModel, Field
 
 JsonSchema = dict[str, Any]
 
 
-class Tool:
-    def __init__(self, name: str, description: str, params: dict[str, JsonSchema],
-                 scope: Literal["read", "action"] = "read",
-                 endpoint: str = "", method: str = "GET",
-                 requires_confirmation: bool = False, agent: str = "",
-                 service: str = "", planned: bool = False):
-        self.name = name
-        self.description = description
-        self.params = params
-        self.scope = scope
-        self.endpoint = endpoint
-        self.method = method
-        self.requires_confirmation = requires_confirmation
-        self.agent = agent
-        self.service = service
-        self.planned = planned
-
+class Tool(BaseModel):
+    name: str
+    description: str
+    params: dict[str, JsonSchema] = Field(default_factory=dict)
+    scope: Literal["read", "action"] = "read"
     endpoint: str = ""       # real route template on the owning service; "" => static/local tool
     method: str = "GET"
     requires_confirmation: bool = False
