@@ -1,4 +1,6 @@
-"""Ollama adapter for local dev — /api/chat with tools."""
+"""OllamaAdapter: POST {OLLAMA_URL}/api/chat with tools= (SPEC D section 0).
+Model default qwen2.5:32b-instruct (USSD path: qwen2.5:14b). All inference
+stays in-enclave; no PII leaves the sovereign zone."""
 from __future__ import annotations
 
 import threading
@@ -26,21 +28,21 @@ def _shared_client() -> httpx.Client:
 
 
 class OllamaAdapter:
-    """Ollama /api/chat. tools_supported=True for qwen3 etc."""
-
-    def __init__(self, base_url: str, model: str, timeout_s: float = 60.0,
+    def __init__(self, base_url: str = "http://localhost:11434",
+                 model: str = "qwen2.5:32b-instruct", timeout_s: float = 60.0,
                  client: httpx.Client | None = None):
         self.base_url = base_url.rstrip("/")
         self.model = model
         self.timeout_s = timeout_s
         self._client = client
 
-    def chat(self, messages: list[dict[str, Any]],
-             tools: list[dict[str, Any]]) -> LLMResponse:
+    def chat(self, messages: list[dict[str, Any]], tools: list[dict[str, Any]],
+             ctx: Any = None) -> LLMResponse:
         payload: dict[str, Any] = {
             "model": self.model,
             "messages": messages,
             "stream": False,
+            "options": {"num_ctx": 32768},
         }
         if tools:
             payload["tools"] = tools
@@ -52,8 +54,9 @@ class OllamaAdapter:
         r.raise_for_status()
         data = r.json()
         msg = data.get("message", {})
-        tcs = [ToolCall(id=f"tc_{i}", name=t["function"]["name"],
-                        arguments=t["function"].get("arguments", {}))
-               for i, t in enumerate(msg.get("tool_calls", []))]
-        return LLMResponse(content=msg.get("content", ""), tool_calls=tcs,
-                           finish_reason=data.get("done_reason", "stop"))
+        calls = [
+            ToolCall(name=c.get("function", {}).get("name", ""),
+                     args=c.get("function", {}).get("arguments", {}) or {})
+            for c in (msg.get("tool_calls") or [])
+        ]
+        return LLMResponse(content=msg.get("content", ""), tool_calls=calls, sim=False)
