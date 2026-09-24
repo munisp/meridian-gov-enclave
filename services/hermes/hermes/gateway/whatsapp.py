@@ -17,15 +17,19 @@
 """
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import hmac
 import json
 import logging
 import re
-import urllib.request
+import threading
+import urllib.request  # noqa: F401 - retained for injected legacy transports
 import uuid
+from concurrent.futures import ThreadPoolExecutor
 from typing import Any, Callable, Optional
 
+import httpx
 from fastapi import BackgroundTasks, FastAPI, Request
 from fastapi.responses import JSONResponse, PlainTextResponse
 
@@ -46,6 +50,10 @@ log = logging.getLogger("hermes.whatsapp")
 GRAPH_VERSION = "v21.0"
 CONFIRM_PREFIX = "wa_confirm:"
 CANCEL_PREFIX = "wa_cancel:"
+
+# Dedicated bounded pool for webhook background processing (see
+# _process_offloaded). NOT Starlette's shared request threadpool.
+_WA_WORKERS = ThreadPoolExecutor(max_workers=8, thread_name_prefix="hermes-wa-bg")
 
 _OTP_RE = re.compile(r"^\d{6}$")
 # Heuristic: requests that need a bound TIN (TIN-scoped tools). General
@@ -98,6 +106,27 @@ def _urllib_transport(url: str, headers: dict[str, str], body: bytes) -> dict[st
         return json.loads(resp.read().decode())
 
 
+# One pooled client for Meta Cloud API sends: multi-chunk answers used to
+# pay a fresh TCP+TLS handshake to graph.facebook.com per chunk.
+_SHARED_SEND: httpx.Client | None = None
+_SHARED_SEND_LOCK = threading.Lock()
+
+
+def _shared_send_client() -> httpx.Client:
+    global _SHARED_SEND
+    with _SHARED_SEND_LOCK:
+        if _SHARED_SEND is None:
+            _SHARED_SEND = httpx.Client(timeout=httpx.Timeout(15.0, connect=5.0))
+    return _SHARED_SEND
+
+
+def _httpx_transport(url: str, headers: dict[str, str], body: bytes) -> dict[str, Any]:
+    resp = _shared_send_client().post(url, headers=headers, content=body,
+                                      timeout=15.0)  # nosec - fixed host
+    resp.raise_for_status()
+    return json.loads(resp.text)
+
+
 class WhatsAppClient:
     """Cloud API send client. SIM mode (no access token / phone number id):
     logs the would-be payload with a [SIM] tag and returns a fake id."""
@@ -108,7 +137,7 @@ class WhatsAppClient:
         self.access_token = access_token
         self.phone_number_id = phone_number_id
         self.graph_url = graph_url.rstrip("/")
-        self.transport = transport or _urllib_transport
+        self.transport = transport or _httpx_transport
 
     @property
     def sim(self) -> bool:
@@ -438,6 +467,17 @@ def add_whatsapp_routes(app: FastAPI, s: Settings, audit: AuditChain,
                 if not _onboard_text(wa_id, st, text):
                     _run_agent(wa_id, text)
 
+    async def _process_offloaded(messages: list[dict[str, Any]]) -> None:
+        """Run the (blocking, sync) message pipeline on the dedicated
+        WhatsApp worker pool. Starlette would otherwise schedule the sync
+        background task on the SHARED request threadpool, where a 15s
+        upstream hang multiplies across queued webhooks and starves every
+        other hermes endpoint. Bounded at 8 workers: excess webhooks queue
+        here (Meta retries on its own cadence; dedup by message id makes
+        redelivery safe)."""
+        loop = asyncio.get_running_loop()
+        await loop.run_in_executor(_WA_WORKERS, _process, messages)
+
     @app.get("/v1/whatsapp/webhook")
     def whatsapp_verify(request: Request):
         token = s.whatsapp_verify_token
@@ -464,7 +504,11 @@ def add_whatsapp_routes(app: FastAPI, s: Settings, audit: AuditChain,
         except (ValueError, UnicodeDecodeError):
             return JSONResponse(status_code=400, content={"detail": "invalid payload"})
         messages = extract_messages(payload)
-        background.add_task(_process, messages)   # 200 fast-ack
+        # 200 fast-ack; processing runs on the DEDICATED WhatsApp worker
+        # pool, not Starlette's shared request threadpool: a slow
+        # einvoicing/Meta/LLM upstream can now back up the WhatsApp queue at
+        # worst, never exhaust the pool serving all other hermes endpoints.
+        background.add_task(_process_offloaded, messages)
         return {"status": "ok", "accepted": len(messages)}
 
     return wa
