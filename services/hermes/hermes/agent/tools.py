@@ -1,9 +1,8 @@
-"""Typed pydantic tool schemas + wrappers for all 5 Hermes agents (SPEC D).
+"""Typed tool registry + executor.
 
-Each tool is a typed wrapper over a platform REST surface (canonical paths in
-hermes.config.ENDPOINTS). HTTP tools execute with the END USER's Keycloak
-token (never a service super-token) so authorization stays user-scoped.
-Static tools (explain_term, upload_doc_hint) resolve locally for fidelity.
+Every agent's tools are declared here with JSON Schema params; the executor
+calls platform REST endpoints with the END USER's Bearer token (never a
+service token). Static tools (glossary, doc hints) resolve locally.
 """
 from __future__ import annotations
 
@@ -12,20 +11,32 @@ import hmac
 import json
 import os
 import re
+import threading
 import uuid
 from typing import Any, Literal, Optional
 
 import httpx
-from pydantic import BaseModel, Field
 
 JsonSchema = dict[str, Any]
 
 
-class Tool(BaseModel):
-    name: str
-    description: str
-    params: dict[str, JsonSchema] = Field(default_factory=dict)
-    scope: Literal["read", "action"] = "read"
+class Tool:
+    def __init__(self, name: str, description: str, params: dict[str, JsonSchema],
+                 scope: Literal["read", "action"] = "read",
+                 endpoint: str = "", method: str = "GET",
+                 requires_confirmation: bool = False, agent: str = "",
+                 service: str = "", planned: bool = False):
+        self.name = name
+        self.description = description
+        self.params = params
+        self.scope = scope
+        self.endpoint = endpoint
+        self.method = method
+        self.requires_confirmation = requires_confirmation
+        self.agent = agent
+        self.service = service
+        self.planned = planned
+
     endpoint: str = ""       # real route template on the owning service; "" => static/local tool
     method: str = "GET"
     requires_confirmation: bool = False
@@ -323,6 +334,20 @@ def _tin_hmac_key() -> bytes:
     return k.encode("utf-8")
 
 
+_SHARED_TOOL_CLIENT: Optional[httpx.Client] = None
+_SHARED_TOOL_LOCK = threading.Lock()
+
+
+def _shared_tool_client() -> httpx.Client:
+    """Process-wide pooled client for tool calls (see ToolExecutor._http)."""
+    global _SHARED_TOOL_CLIENT
+    with _SHARED_TOOL_LOCK:
+        if _SHARED_TOOL_CLIENT is None:
+            _SHARED_TOOL_CLIENT = httpx.Client(
+                timeout=httpx.Timeout(30.0, connect=5.0))
+    return _SHARED_TOOL_CLIENT
+
+
 class ToolExecutor:
     """Executes tools against the platform. The Authorization header is ALWAYS
     the end user's token (ctx.user_token) - never a service super-token."""
@@ -339,11 +364,24 @@ class ToolExecutor:
         # fall back to the platform base (APISIX edge).
         self.service_urls = {k: v.rstrip("/") for k, v in (service_urls or {}).items() if v}
         self.seen_auth_headers: list[str] = []  # test observability
+        self._client_lock = threading.Lock()
 
     def _http(self) -> httpx.Client:
+        """Pooled HTTP client. Previously a NEW httpx.Client was built per
+        tool call (a fresh TCP+TLS handshake per call, and unclosed clients
+        under load). Now: an injected/mocked client is used as-is; a custom
+        transport gets one cached client per executor; the default path
+        shares one process-wide pooled client (per-request timeout below
+        preserves timeout_s)."""
         if self._client is not None:
             return self._client
-        return httpx.Client(timeout=self.timeout_s, transport=self._transport)
+        if self._transport is not None:
+            with self._client_lock:
+                if self._client is None:
+                    self._client = httpx.Client(timeout=self.timeout_s,
+                                                transport=self._transport)
+            return self._client
+        return _shared_tool_client()
 
     def _base_for(self, tool: Tool) -> str:
         return self.service_urls.get(tool.service, self.base_url)
@@ -385,9 +423,10 @@ class ToolExecutor:
             if tool.method == "GET":
                 r = self._http().get(url, params={k: v for k, v in args.items()
                                                   if not isinstance(v, (dict, list))},
-                                     headers=headers)
+                                     headers=headers, timeout=self.timeout_s)
             else:
-                r = self._http().post(url, json=args, headers=headers)
+                r = self._http().post(url, json=args, headers=headers,
+                                      timeout=self.timeout_s)
             r.raise_for_status()
             try:
                 return r.json()
