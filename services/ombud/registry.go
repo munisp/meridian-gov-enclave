@@ -103,23 +103,39 @@ func NewCaseStore(root string, ackDays, decideDays int, pg *storex.DB) (*CaseSto
 	return s, nil
 }
 
-func (s *CaseStore) saveLocked() {
+// saveLocked persists ONLY the mutated case (c). Callers hold s.mu.
+// Previously this upserted EVERY case per mutation (O(N) Postgres round
+// trips with the mutex held, errors swallowed) — write latency grew
+// linearly with the case count and PG failures were silently dropped.
+// Now: exactly one UpsertDoc on the pg backend, and persistence errors are
+// surfaced to the caller (which reports a 5xx instead of claiming success
+// on a case that was never written).
+func (s *CaseStore) saveLocked(c *Case) error {
+	if s.pg != nil {
+		doc, err := json.Marshal(c)
+		if err != nil {
+			return fmt.Errorf("marshal case %s: %w", c.ID, err)
+		}
+		if err := s.pg.UpsertDoc(context.Background(), CasesTable, c.ID, doc); err != nil {
+			return fmt.Errorf("persist case %s: %w", c.ID, err)
+		}
+		return nil
+	}
+	// Dev fallback (embedded JSON file): the whole document is the file, so
+	// a full rewrite is inherent to the format.
 	rows := make([]*Case, 0, len(s.byID))
 	for _, c := range s.byID {
 		rows = append(rows, c)
 	}
 	sort.Slice(rows, func(i, j int) bool { return rows[i].ID < rows[j].ID })
-	if s.pg != nil {
-		ctx := context.Background()
-		for _, c := range rows {
-			if doc, err := json.Marshal(c); err == nil {
-				_ = s.pg.UpsertDoc(ctx, CasesTable, c.ID, doc)
-			}
-		}
-		return
+	data, err := json.MarshalIndent(rows, "", "  ")
+	if err != nil {
+		return fmt.Errorf("marshal cases file: %w", err)
 	}
-	data, _ := json.MarshalIndent(rows, "", "  ")
-	_ = os.WriteFile(s.path, data, 0o644)
+	if err := os.WriteFile(s.path, data, 0o644); err != nil {
+		return fmt.Errorf("write cases file: %w", err)
+	}
+	return nil
 }
 
 func (s *CaseStore) Intake(actor string, c *Case) (*Case, error) {
@@ -142,7 +158,9 @@ func (s *CaseStore) Intake(actor string, c *Case) (*Case, error) {
 	c.History = []HistoryEntry{{At: c.CreatedAt, Actor: actor, Action: "intake",
 		Detail: "case received; deadlines set per rp-procedure-ombud"}}
 	s.byID[c.ID] = c
-	s.saveLocked()
+	if err := s.saveLocked(c); err != nil {
+		return nil, err
+	}
 	return c, nil
 }
 
@@ -189,7 +207,9 @@ func (s *CaseStore) Transition(actor, id, action, detail string) (*Case, error) 
 	c.State = next
 	c.UpdatedAt = time.Now().UTC().Format(time.RFC3339)
 	c.History = append(c.History, HistoryEntry{At: c.UpdatedAt, Actor: actor, Action: action, Detail: detail})
-	s.saveLocked()
+	if err := s.saveLocked(c); err != nil {
+		return nil, err
+	}
 	return c, nil
 }
 
@@ -222,8 +242,7 @@ func (s *CaseStore) AttachDeposit(id string, h *DepositHold) error {
 	c.UpdatedAt = time.Now().UTC().Format(time.RFC3339)
 	c.History = append(c.History, HistoryEntry{At: c.UpdatedAt, Actor: "system",
 		Action: "deposit_hold", Detail: fmt.Sprintf("hold %s for %d kobo on ledger 500", h.HoldID, h.AmountKobo)})
-	s.saveLocked()
-	return nil
+	return s.saveLocked(c)
 }
 
 // SetDepositStatus records the terminal status of a deposit hold
@@ -244,8 +263,7 @@ func (s *CaseStore) SetDepositStatus(id, status, detail string) error {
 	c.UpdatedAt = time.Now().UTC().Format(time.RFC3339)
 	c.History = append(c.History, HistoryEntry{At: c.UpdatedAt, Actor: "system",
 		Action: "deposit_" + status, Detail: detail})
-	s.saveLocked()
-	return nil
+	return s.saveLocked(c)
 }
 
 func (s *CaseStore) AddDocument(id string, doc CaseDoc) error {
@@ -258,8 +276,7 @@ func (s *CaseStore) AddDocument(id string, doc CaseDoc) error {
 	doc.AddedAt = time.Now().UTC().Format(time.RFC3339)
 	c.Documents = append(c.Documents, doc)
 	c.UpdatedAt = doc.AddedAt
-	s.saveLocked()
-	return nil
+	return s.saveLocked(c)
 }
 
 // Search is the dev privilege-filtered index: full-text over id/grounds/
